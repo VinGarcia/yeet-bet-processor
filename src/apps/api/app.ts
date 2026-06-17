@@ -2,7 +2,13 @@ import Fastify, { type FastifyInstance } from 'fastify'
 import type { Kysely } from 'kysely'
 import type { DB } from '../../adapters/repo/kyselyrepo/schema.js'
 import { KyselyRepo } from '../../adapters/repo/kyselyrepo/index.js'
-import { DomainError, BadRequestError, ForbiddenError, NotFoundError } from '../../core/errors.js'
+import {
+  DomainError,
+  BadRequestError,
+  ForbiddenError,
+  NotFoundError,
+  InsufficientFundsError,
+} from '../../core/errors.js'
 import { registerHealthController } from './health.controller.js'
 import { registerProcessController } from './process.controller.js'
 import { registerHmacAuth } from './middlewares/hmac-auth.js'
@@ -38,6 +44,8 @@ export async function buildApp({
     if (err instanceof ForbiddenError) return 403
     if (err instanceof BadRequestError) return 400
     if (err instanceof NotFoundError) return 404
+    // Insufficient funds is a well-formed request the server won't apply.
+    if (err instanceof InsufficientFundsError) return 422
     // Domain errors are client errors by default.
     return 400
   }

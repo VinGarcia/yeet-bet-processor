@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import type { Repo } from '../../adapters/repo/contracts.js'
+import type { BetAction } from '../../core/entities.js'
 import { BadRequestError } from '../../core/errors.js'
 
 /**
@@ -9,13 +10,42 @@ import { BadRequestError } from '../../core/errors.js'
 interface ProcessRequest {
   userId: string
   currency: string
-  actions: unknown[]
+  game?: string
+  gameId?: string
+  actions: BetAction[]
+}
+
+/**
+ * Narrows one unvalidated array element to a {@link BetAction}. Only `bet` is
+ * supported; `win`/`rollback` are future slices and rejected as bad requests
+ * for now (a 400 is safer than silently dropping or misapplying them).
+ */
+function parseAction(raw: unknown): BetAction {
+  if (typeof raw !== 'object' || raw === null) {
+    throw new BadRequestError('each action must be a JSON object')
+  }
+  if (!('action' in raw) || raw.action !== 'bet') {
+    throw new BadRequestError('unsupported action type; only "bet" is supported')
+  }
+  if (!('action_id' in raw) || typeof raw.action_id !== 'string') {
+    throw new BadRequestError('action_id is required and must be a string')
+  }
+  if (
+    !('amount' in raw) ||
+    typeof raw.amount !== 'number' ||
+    !Number.isInteger(raw.amount) ||
+    raw.amount <= 0
+  ) {
+    throw new BadRequestError('amount is required and must be a positive integer')
+  }
+  return { action: 'bet', actionId: raw.action_id, amount: raw.amount }
 }
 
 /**
  * Narrows an unvalidated parsed body to {@link ProcessRequest} without `as` or
- * `any`. `user_id` and `currency` are required strings; `actions` is optional
- * and defaults to an empty list (a balance-only request).
+ * `any`. `user_id` and `currency` are required strings; `game`/`game_id` are
+ * optional strings echoed through; `actions` is optional and defaults to an
+ * empty list (a balance-only request).
  */
 function parseProcessRequest(body: unknown): ProcessRequest {
   if (typeof body !== 'object' || body === null) {
@@ -27,30 +57,45 @@ function parseProcessRequest(body: unknown): ProcessRequest {
   if (!('currency' in body) || typeof body.currency !== 'string') {
     throw new BadRequestError('currency is required')
   }
+  let game: string | undefined
+  if ('game' in body) {
+    if (typeof body.game !== 'string') throw new BadRequestError('game must be a string')
+    game = body.game
+  }
+  let gameId: string | undefined
+  if ('game_id' in body) {
+    if (typeof body.game_id !== 'string') throw new BadRequestError('game_id must be a string')
+    gameId = body.game_id
+  }
 
-  const actions = 'actions' in body && Array.isArray(body.actions) ? body.actions : []
+  const rawActions = 'actions' in body && Array.isArray(body.actions) ? body.actions : []
+  const actions = rawActions.map(parseAction)
 
-  return { userId: body.user_id, currency: body.currency, actions }
+  return { userId: body.user_id, currency: body.currency, game, gameId, actions }
 }
 
 /**
  * Registers the `POST /aggregator/takehome/process` endpoint.
  *
  * A request with no `actions` is a balance-only lookup: it returns the wallet's
- * balance (0 when the user has no wallet). Requests carrying `actions` are not
- * processed yet and fall through to the existing stub response.
+ * balance (0 when the user has no wallet). Requests carrying `actions` apply the
+ * batch atomically and return the new balance, the per-action transactions, and
+ * the echoed `game_id`.
  */
 export function registerProcessController(app: FastifyInstance, repo: Repo): void {
   app.post('/aggregator/takehome/process', async (request, reply) => {
-    const { userId, currency, actions } = parseProcessRequest(request.body)
+    const { userId, currency, game, gameId, actions } = parseProcessRequest(request.body)
 
     if (actions.length === 0) {
       const wallet = await repo.findWallet(userId, currency)
       return reply.code(200).send({ balance: wallet?.balance ?? 0 })
     }
 
-    // Intentional stub: requests carrying `actions` are not processed yet.
-    // Slice 3b implements bet processing and returns the real response here.
-    return reply.code(200).send({})
+    const result = await repo.processActions({ userId, currency, game, gameId, actions })
+    return reply.code(200).send({
+      balance: result.balance,
+      transactions: result.transactions.map((t) => ({ action_id: t.actionId, tx_id: t.txId })),
+      game_id: result.gameId,
+    })
   })
 }

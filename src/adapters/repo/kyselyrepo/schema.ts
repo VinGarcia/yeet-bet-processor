@@ -16,8 +16,29 @@ export interface WalletsTable {
 }
 
 /**
+ * Append-only ledger of processed actions. `action_id` is unique, which makes
+ * inserts idempotent: a replayed action collides and is never applied twice.
+ * `id` is the transaction id returned to the aggregator (generated in the app).
+ */
+export interface TransactionsTable {
+  id: string
+  action_id: string
+  user_id: string
+  currency: string
+  game: string | null
+  game_id: string | null
+  type: string
+  // Stored as Postgres `bigint`: read back as a `string`, written as a `number`.
+  amount: ColumnType<string, number, number>
+  original_action_id: string | null
+  // Defaulted server-side and managed by the DB; never written by inserts.
+  created_at: ColumnType<Date, never, Date>
+}
+
+/**
  * Kysely database schema. Tables are added here as the data model grows.
  */
 export interface DB {
   wallets: WalletsTable
+  transactions: TransactionsTable
 }

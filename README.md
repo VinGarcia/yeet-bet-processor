@@ -1,6 +1,24 @@
 # yeet-bet-processor
 
-WIP, slice 1.
+WIP.
+
+## Design decisions
+
+- **Batch failure is whole-request rollback (atomic).** The spec says to process
+  a round's actions "atomically", and the insufficient-funds response is a bare
+  `{ code, message }` with no `transactions` array. So a batch that can't be
+  covered rolls back entirely: no wallet change, no ledger rows. We deliberately
+  rejected per-action partial reporting (apply what fits, report the rest) — it
+  contradicts "atomically" and has no shape in the response, and a betting round
+  is a single unit of work, not independently-committable lines.
+- **Idempotency via `UNIQUE(action_id)`.** A replayed `action_id` is detected up
+  front and is never applied twice; the replay returns the original `tx_id`, so
+  retries and at-least-once delivery from the aggregator are safe.
+- **Fixed ~3-statement transaction, not a giant CTE.** Each batch runs a constant
+  number of statements regardless of size: select existing action_ids, one
+  guarded wallet debit for the net of new bets, one bulk ledger insert. This
+  keeps the SQL readable and debuggable; a single all-in-one CTE would be far
+  harder to reason about for no real throughput gain at these batch sizes.
 
 ## Database & migrations
 

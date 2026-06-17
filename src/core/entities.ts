@@ -9,3 +9,14 @@ export interface Wallet {
   currency: string
   balance: number
 }
+
+/**
+ * A single bet within a process request, in the camelCase domain shape.
+ * `amount` is a positive integer in the smallest currency unit. `win` and
+ * `rollback` actions are future slices and not modelled yet.
+ */
+export interface BetAction {
+  action: 'bet'
+  actionId: string
+  amount: number
+}

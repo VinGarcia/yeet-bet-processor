@@ -31,11 +31,50 @@ const createWallets: Migration = {
 }
 
 /**
+ * Creates the `transactions` table: an append-only ledger of processed actions.
+ *
+ * `action_id` is `UNIQUE`, which is the idempotency key — a replayed action
+ * collides on insert and is never applied twice. `amount` is a non-negative
+ * integer in the smallest currency unit. The (`user_id`, `created_at`) index
+ * supports per-user ledger reads.
+ */
+const createTransactions: Migration = {
+  async up(db: Kysely<DB>): Promise<void> {
+    await db.schema
+      .createTable('transactions')
+      .addColumn('id', 'uuid', (col) => col.primaryKey())
+      .addColumn('action_id', 'uuid', (col) => col.notNull().unique())
+      .addColumn('user_id', 'text', (col) => col.notNull())
+      .addColumn('currency', 'text', (col) => col.notNull())
+      .addColumn('game', 'text')
+      .addColumn('game_id', 'text')
+      .addColumn('type', 'text', (col) =>
+        col.notNull().check(sql`type in ('bet', 'win', 'rollback')`),
+      )
+      .addColumn('amount', 'bigint', (col) => col.notNull())
+      .addColumn('original_action_id', 'uuid')
+      .addColumn('created_at', 'timestamptz', (col) => col.notNull().defaultTo(sql`now()`))
+      .execute()
+
+    await db.schema
+      .createIndex('transactions_user_created_idx')
+      .on('transactions')
+      .columns(['user_id', 'created_at'])
+      .execute()
+  },
+
+  async down(db: Kysely<DB>): Promise<void> {
+    await db.schema.dropTable('transactions').execute()
+  },
+}
+
+/**
  * All migrations, keyed by name. Keys are lexicographically ordered so the
  * Migrator applies them in sequence. Add new migrations with the next prefix.
  */
 export const migrations: Record<string, Migration> = {
   '001_create_wallets': createWallets,
+  '002_create_transactions': createTransactions,
 }
 
 // In-code provider: returns the `migrations` object directly. Avoids

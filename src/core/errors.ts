@@ -40,3 +40,14 @@ export class InternalError extends DomainError {
     super(message, 500)
   }
 }
+
+/**
+ * Raised when a player's wallet cannot cover the net debit of a batch. Carries
+ * the spec's domain code `100`. The whole request is rolled back: no wallet
+ * change and no ledger rows are written.
+ */
+export class InsufficientFundsError extends DomainError {
+  constructor(message = 'Player has not enough funds to process an action') {
+    super(message, 100)
+  }
+}
