@@ -1,12 +1,14 @@
-import { Pool } from 'pg'
-import { Kysely, PostgresDialect } from 'kysely'
 import { config } from '../../config.js'
-import type { DB } from '../../adapters/repo/kyselyrepo/schema.js'
+import { createDb } from '../../adapters/repo/kyselyrepo/create-db.js'
+import { migrate } from '../../adapters/repo/kyselyrepo/migrations/index.js'
 import { buildApp } from './app.js'
 
 async function main(): Promise<void> {
-  const pool = new Pool({ connectionString: config.databaseUrl })
-  const db = new Kysely<DB>({ dialect: new PostgresDialect({ pool }) })
+  const db = createDb(config.databaseUrl)
+
+  // Self-migrate on boot so a fresh database is brought to the latest schema
+  // before the app starts serving traffic.
+  await migrate(db)
 
   const app = await buildApp({ db, hmacSecret: config.hmacSecret })
 

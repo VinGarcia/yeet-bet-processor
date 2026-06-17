@@ -59,7 +59,7 @@ export async function buildApp({
   // parser and HMAC guard never apply to `/health`.
   await app.register((protectedScope, _opts, done) => {
     registerHmacAuth(protectedScope, { secret: hmacSecret })
-    registerProcessController(protectedScope)
+    registerProcessController(protectedScope, repo)
     done()
   })
 

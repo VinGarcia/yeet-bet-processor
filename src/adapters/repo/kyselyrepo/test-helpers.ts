@@ -1,15 +1,10 @@
-import type { Kysely } from 'kysely'
+import { sql, type Kysely } from 'kysely'
 import type { DB } from './schema.js'
 
 /**
- * Resets the test database between tests.
- *
- * No tables exist yet (slice 1), so this is a no-op.
- *
- * TODO: once tables exist, TRUNCATE every table with
- * `RESTART IDENTITY CASCADE` to give each test a clean, deterministic state.
+ * Resets the test database between tests by truncating every table, giving each
+ * test a clean, deterministic state. Safe to call once the schema is migrated.
  */
 export async function resetTestDB(db: Kysely<DB>): Promise<void> {
-  void db
-  return Promise.resolve()
+  await sql`TRUNCATE wallets RESTART IDENTITY CASCADE`.execute(db)
 }

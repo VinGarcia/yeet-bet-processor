@@ -2,6 +2,21 @@
 
 WIP, slice 1.
 
+## Database & migrations
+
+Migrations run **automatically on startup** (the app calls `migrate(db)` before
+it begins serving), so a fresh database is brought to the latest schema on boot.
+This is a deliberate choice: Kysely's `Migrator` takes a Postgres advisory lock,
+so concurrent replicas booting at once race safely (only one applies a given
+migration). Revisit moving migrations to a standalone job only if they grow long
+(blocking startup) or the app needs a least-privilege, DML-only DB role at
+runtime. A `pnpm migrate` entrypoint is also available to run them explicitly.
+
+Wallet `balance` is stored as a Postgres `bigint` in minor units (smallest
+currency unit) and converted to a JS `number` at the adapter boundary (in
+`findWallet`). This is precision-safe below `2^53`; balances beyond that would
+lose precision — a documented limit for extreme values.
+
 ## Health check
 
 `GET /health` is an **unauthenticated** endpoint. It is a load-balancer /
