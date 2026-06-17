@@ -12,6 +12,19 @@ async function main(): Promise<void> {
 
   await app.listen({ port: config.port, host: '0.0.0.0' })
   app.log.info(`server listening on port ${config.port}`)
+
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.on(signal, () => {
+      app.log.info(`received ${signal}, shutting down`)
+      void app.close().then(
+        () => process.exit(0),
+        (err) => {
+          app.log.error(err)
+          process.exit(1)
+        },
+      )
+    })
+  }
 }
 
 main().catch((err: unknown) => {
