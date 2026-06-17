@@ -536,3 +536,104 @@ describe('POST /aggregator/takehome/process (new-user / missing-wallet path)', (
     expect(await dbTxCount(user)).toBe(1)
   })
 })
+
+describe('POST /aggregator/takehome/process (win)', () => {
+  // Scenario D: a bet and a win in one call apply in order; the win credits the
+  // wallet. Final balance = start - 100 + 250 = start + 150.
+  it('applies a bet and a win in the same call, in order', async () => {
+    const user = '8|USDT|USD'
+    await setup({ wallets: [{ userId: user, currency: 'USD', balance: 74321901 }] })
+
+    const betId = '7c8affbf-53fd-4fcc-b1ca-18118c5dd287'
+    const winId = '86441c7a-560e-4501-b829-110af6a1b956'
+    const raw = JSON.stringify({
+      user_id: user,
+      currency: 'USD',
+      game: 'acceptance:test',
+      game_id: '1761032910488163506',
+      actions: [
+        { action: 'bet', action_id: betId, amount: 100 },
+        { action: 'win', action_id: winId, amount: 250 },
+      ],
+    })
+
+    const res = await postSigned(raw)
+    expect(res.status).toBe(200)
+    const payload = (await res.json()) as {
+      balance: number
+      transactions: { action_id: string; tx_id: string }[]
+      game_id: string
+    }
+    expect(payload.balance).toBe(74322051)
+    expect(payload.game_id).toBe('1761032910488163506')
+    expect(payload.transactions.map((t) => t.action_id)).toEqual([betId, winId])
+    expect(payload.transactions[0]!.tx_id).toMatch(UUID_RE)
+    expect(payload.transactions[1]!.tx_id).toMatch(UUID_RE)
+
+    expect(await dbBalance(user, 'USD')).toBe(74322051)
+    expect(await dbTxCount(user)).toBe(2)
+  })
+
+  // Scenario F: bet then win across two separate calls. Each call credits/debits
+  // independently; the second call sees the balance left by the first.
+  it('applies a bet then a win across separate calls', async () => {
+    const user = '8|USDT|USD'
+    await setup({ wallets: [{ userId: user, currency: 'USD', balance: 74322201 }] })
+
+    const betRaw = JSON.stringify({
+      user_id: user,
+      currency: 'USD',
+      game: 'acceptance:test',
+      game_id: '1761032911166149146',
+      actions: [{ action: 'bet', action_id: '19bd35d5-50c3-4720-a402-145a46ab874c', amount: 100 }],
+    })
+    const betRes = await postSigned(betRaw)
+    expect(betRes.status).toBe(200)
+    expect(((await betRes.json()) as { balance: number }).balance).toBe(74322101)
+
+    const winRaw = JSON.stringify({
+      user_id: user,
+      currency: 'USD',
+      game: 'acceptance:test',
+      game_id: '1761032911166149146',
+      actions: [{ action: 'win', action_id: 'dcafc246-24b6-458b-a823-f6e7ecd6e9c3', amount: 700 }],
+    })
+    const winRes = await postSigned(winRaw)
+    expect(winRes.status).toBe(200)
+    expect(((await winRes.json()) as { balance: number }).balance).toBe(74322801)
+
+    expect(await dbBalance(user, 'USD')).toBe(74322801)
+    expect(await dbTxCount(user)).toBe(2)
+  })
+
+  // In-order semantics are now OBSERVABLE: with a win after a bet, a per-step
+  // check and a net-sum check DISAGREE. balance 50, [bet 100, win 200]: the bet
+  // overdraws at step 1 (-50) so the whole request is rejected with code 100 and
+  // rolls back — even though the net delta (+100) would leave a positive balance.
+  // This is the test a net-only implementation cannot pass.
+  it('rejects a batch whose bet overdraws before a later win, despite positive net', async () => {
+    const user = '8|USDT|USD'
+    await setup({ wallets: [{ userId: user, currency: 'USD', balance: 50 }] })
+
+    const raw = JSON.stringify({
+      user_id: user,
+      currency: 'USD',
+      game: 'acceptance:test',
+      game_id: '1761032911004723999',
+      actions: [
+        { action: 'bet', action_id: 'a1111111-1111-4111-8111-111111111111', amount: 100 },
+        { action: 'win', action_id: 'b2222222-2222-4222-8222-222222222222', amount: 200 },
+      ],
+    })
+
+    const res = await postSigned(raw)
+    expect(res.status).toBeGreaterThanOrEqual(400)
+    expect(res.status).toBeLessThan(500)
+    const payload = (await res.json()) as { code: number; message: string }
+    expect(payload.code).toBe(100)
+
+    // Whole request rolled back: nothing applied.
+    expect(await dbBalance(user, 'USD')).toBe(50)
+    expect(await dbTxCount(user)).toBe(0)
+  })
+})

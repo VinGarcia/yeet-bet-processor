@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import type { Repo } from '../../adapters/repo/contracts.js'
-import type { BetAction } from '../../core/entities.js'
+import type { Action } from '../../core/entities.js'
 import { BadRequestError } from '../../core/errors.js'
 
 /**
@@ -12,20 +12,22 @@ interface ProcessRequest {
   currency: string
   game?: string
   gameId?: string
-  actions: BetAction[]
+  actions: Action[]
 }
 
 /**
- * Narrows one unvalidated array element to a {@link BetAction}. Only `bet` is
- * supported; `win`/`rollback` are future slices and rejected as bad requests
- * for now (a 400 is safer than silently dropping or misapplying them).
+ * Narrows one unvalidated array element to an {@link Action}. `bet` and `win`
+ * share the same wire shape (string `action_id`, positive-integer `amount`);
+ * they differ only by `action`, which the domain uses to pick debit vs credit.
+ * `rollback` is a future slice and any other type is rejected as a bad request
+ * (a 400 is safer than silently dropping or misapplying them).
  */
-function parseAction(raw: unknown): BetAction {
+function parseAction(raw: unknown): Action {
   if (typeof raw !== 'object' || raw === null) {
     throw new BadRequestError('each action must be a JSON object')
   }
-  if (!('action' in raw) || raw.action !== 'bet') {
-    throw new BadRequestError('unsupported action type; only "bet" is supported')
+  if (!('action' in raw) || (raw.action !== 'bet' && raw.action !== 'win')) {
+    throw new BadRequestError('unsupported action type; only "bet" and "win" are supported')
   }
   if (!('action_id' in raw) || typeof raw.action_id !== 'string') {
     throw new BadRequestError('action_id is required and must be a string')
@@ -38,7 +40,7 @@ function parseAction(raw: unknown): BetAction {
   ) {
     throw new BadRequestError('amount is required and must be a positive integer')
   }
-  return { action: 'bet', actionId: raw.action_id, amount: raw.amount }
+  return { action: raw.action, actionId: raw.action_id, amount: raw.amount }
 }
 
 /**

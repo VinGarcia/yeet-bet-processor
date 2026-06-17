@@ -12,14 +12,32 @@ export interface Wallet {
 
 /**
  * A single bet within a process request, in the camelCase domain shape.
- * `amount` is a positive integer in the smallest currency unit. `win` and
- * `rollback` actions are future slices and not modelled yet.
+ * `amount` is a positive integer in the smallest currency unit; it debits the
+ * wallet and may overdraw (rejected per-step).
  */
 export interface BetAction {
   action: 'bet'
   actionId: string
   amount: number
 }
+
+/**
+ * A single win within a process request, in the camelCase domain shape.
+ * `amount` is a positive integer in the smallest currency unit; it credits the
+ * wallet and never overdraws.
+ */
+export interface WinAction {
+  action: 'win'
+  actionId: string
+  amount: number
+}
+
+/**
+ * A single action to apply, discriminated on `action`. The direction (debit vs
+ * credit) is encoded by the variant, not by the sign of `amount` (always > 0).
+ * `rollback` is a future slice and not modelled yet.
+ */
+export type Action = BetAction | WinAction
 
 /**
  * A batch of actions to apply for one user/currency, with the optional game
@@ -30,5 +48,5 @@ export interface UserActions {
   currency: string
   game?: string
   gameId?: string
-  actions: BetAction[]
+  actions: Action[]
 }

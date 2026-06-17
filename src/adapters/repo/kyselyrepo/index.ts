@@ -59,30 +59,33 @@ export class KyselyRepo implements Repo {
   }
 
   /**
-   * Applies a batch of bets in a single transaction:
+   * Applies a batch of actions (`bet` debits, `win` credits) in a single
+   * transaction:
    *
    *   1. SELECT existing rows for the batch's `action_id`s (idempotency map).
-   *   2. The *new* bets (not already applied) each get a fresh `txId`.
-   *   3. With new bets present, *ensure-and-lock* the wallet row via a no-op
+   *   2. The *new* actions (not already applied) each get a fresh `txId`.
+   *   3. With new actions present, *ensure-and-lock* the wallet row via a no-op
    *      upsert (INSERT … ON CONFLICT DO UPDATE SET balance = wallets.balance
    *      RETURNING balance). This atomically creates the row at 0 if it is
-   *      absent, takes a row lock either way (so concurrent first-bet batches
+   *      absent, takes a row lock either way (so concurrent first-action batches
    *      for the same user serialize on it), and returns the current balance.
-   *      We then apply each new bet IN REQUEST ORDER against a running balance;
-   *      the first bet that would drive it below zero throws
-   *      `InsufficientFundsError`, rolling the whole transaction back.
+   *      We then apply each new action IN REQUEST ORDER against a running
+   *      balance: a `bet` subtracts and the first one to drive the balance below
+   *      zero throws `InsufficientFundsError` (rolling the whole transaction
+   *      back); a `win` adds and never overdraws.
    *   4. Write the computed final balance and bulk-INSERT the new ledger rows.
    *      The DB `CHECK(balance >= 0)` stays as a backstop.
    *
-   * Contract: a bet against a *non-existent* wallet lazily creates it at
+   * Contract: an action against a *non-existent* wallet lazily creates it at
    * balance 0, so any positive bet still rejects via the per-step check (and the
    * created-at-0 row is rolled back with the transaction). This removes the old
    * silent-debit-loss bug where a bare UPDATE matched zero rows for a new user
    * while the ledger insert still wrote, diverging wallet and ledger.
    *
-   * With no new bets (all replays) it just reads the current balance — no lock,
-   * no write. The returned `transactions` array is in request order: replays
-   * carry their original `txId`, new bets carry the `id` generated here.
+   * With no new actions (all replays) it just reads the current balance — no
+   * lock, no write. The returned `transactions` array is in request order:
+   * replays carry their original `txId`, new actions carry the `id` generated
+   * here.
    */
   async processActions(
     input: UserActions,
@@ -188,7 +191,7 @@ export class KyselyRepo implements Repo {
       // (unlocked) idempotency SELECT, get distinct tx ids, debit twice, and then
       // collide on the UNIQUE(action_id) ledger insert (a raw 23505 → 500).
       const seen = new Set<string>()
-      const newBets = actions
+      const newActions = actions
         .filter(
           (a) =>
             !appliedTxByAction.has(a.actionId) && !seen.has(a.actionId) && seen.add(a.actionId),
@@ -196,7 +199,7 @@ export class KyselyRepo implements Repo {
         .map((a) => ({ ...a, txId: randomUUID() }))
 
       let balance: number
-      if (newBets.length > 0) {
+      if (newActions.length > 0) {
         // 3. Ensure-and-lock the wallet row in one statement: INSERT the row at
         // balance 0 if absent, else a no-op DO UPDATE (balance = wallets.balance)
         // that still takes the row lock. Either way we get a locked row back and
@@ -214,11 +217,19 @@ export class KyselyRepo implements Repo {
           .executeTakeFirstOrThrow()
         balance = Number(wallet.balance)
 
-        // Apply each new bet in request order; the first one that overdraws the
-        // wallet fails the whole request (a rollback, since we throw in-trx).
-        for (const bet of newBets) {
-          balance -= bet.amount
-          if (balance < 0) throw new InsufficientFundsError()
+        // Apply each new action in request order against the running balance.
+        // A `bet` debits and may overdraw — the first one that drives the
+        // balance below zero fails the whole request (a rollback, since we
+        // throw in-trx). A `win` credits and never overdraws. The per-step
+        // (not net) check is what makes [bet 100, win 200] on balance 50 reject
+        // at the bet even though the net (+100) is positive.
+        for (const action of newActions) {
+          if (action.action === 'bet') {
+            balance -= action.amount
+            if (balance < 0) throw new InsufficientFundsError()
+          } else {
+            balance += action.amount
+          }
         }
 
         // 4. Write the computed final balance, then bulk-insert the ledger rows.
@@ -232,15 +243,17 @@ export class KyselyRepo implements Repo {
         await trx
           .insertInto('transactions')
           .values(
-            newBets.map((b) => ({
-              id: b.txId,
-              action_id: b.actionId,
+            newActions.map((a) => ({
+              id: a.txId,
+              action_id: a.actionId,
               user_id: userId,
               currency,
               game: game ?? null,
               game_id: gameId ?? null,
-              type: b.action,
-              amount: b.amount,
+              // The action type ('bet' | 'win') encodes debit vs credit;
+              // `amount` is stored as the positive integer either way.
+              type: a.action,
+              amount: a.amount,
               original_action_id: null,
             })),
           )
@@ -259,11 +272,11 @@ export class KyselyRepo implements Repo {
       }
 
       // Build the response in request order: replay → original id, new → fresh.
-      const newTxByAction = new Map(newBets.map((b) => [b.actionId, b.txId]))
+      const newTxByAction = new Map(newActions.map((a) => [a.actionId, a.txId]))
       const transactions = actions.map((a) => ({
         actionId: a.actionId,
         // Invariant: every action is either a replay (in `appliedTxByAction`) or
-        // new (in `newTxByAction`) — `newBets` is exactly the actions not in the
+        // new (in `newTxByAction`) — `newActions` is exactly the actions not in the
         // applied map — so one of the two lookups always hits. The `!` is thus
         // provably safe: the `??` falls through only for a new action, which is
         // guaranteed to be in `newTxByAction`.

@@ -9,9 +9,11 @@ WIP.
   that would drive the balance below zero rejects the **whole request** with code
   `100` and rolls everything back. We check at each step, not just the net of the
   batch. With bets only this is indistinguishable from a net check (debits
-  commute), but it becomes observable once wins can interleave with bets in a
-  batch — a later win cannot retroactively fund an earlier bet that already
-  overdrew. That interleaving arrives in slice 3c.
+  commute), but it becomes observable once wins interleave with bets in a batch —
+  a later win cannot retroactively fund an earlier bet that already overdrew. The
+  concrete case: balance `50`, `[bet 100, win 200]` rejects with code `100`
+  because the bet overdraws at step 1 (`-50`), even though the net delta (`+100`)
+  would leave a positive balance. A net-only implementation cannot reject this.
 - **Wallet row is ensured-and-locked via upsert before the balance check.**
   Instead of `SELECT … FOR UPDATE` (which locks nothing when the row is absent)
   plus a bare `UPDATE` (which silently matches zero rows for a brand-new user,
@@ -65,6 +67,11 @@ decision:
   `2^53`. Balances beyond that would lose precision. Accepted for now; revisit if
   real balances can approach that magnitude (move math to `bigint`/`string` end
   to end).
+- **Integer overflow is not guarded.** Balances and amounts are integer minor
+  units handled as JS `number`s, and the running-balance arithmetic does not check
+  for overflow. Realistic values stay well below `Number.MAX_SAFE_INTEGER`
+  (`2^53`), so we deliberately accept this rather than add guards. A real system
+  carrying balances near that ceiling would use `BigInt` or `NUMERIC` end to end.
 
 ## Database & migrations
 
