@@ -38,23 +38,18 @@ export async function buildApp({
 
   const repo = new KyselyRepo(db)
 
-  // Maps a domain error to an HTTP status. HTTP knowledge lives only in this
-  // adapter; the core errors carry domain codes, not transport status.
-  function httpStatusFor(err: DomainError): number {
-    if (err instanceof ForbiddenError) return 403
-    if (err instanceof BadRequestError) return 400
-    if (err instanceof NotFoundError) return 404
-    // Insufficient funds is a well-formed request the server won't apply.
-    if (err instanceof InsufficientFundsError) return 422
-    // Domain errors are client errors by default.
-    return 400
-  }
-
   // Central mapping of domain errors to HTTP responses. Registered before the
-  // protected scope so the encapsulated scope inherits it.
+  // protected scope so the encapsulated scope inherits it. HTTP knowledge lives
+  // only here; the core errors carry domain codes, not transport status.
   app.setErrorHandler((err, request, reply) => {
     if (err instanceof DomainError) {
-      return reply.code(httpStatusFor(err)).send({ code: err.code, message: err.message })
+      let status = 400 // Domain errors are client errors by default.
+      if (err instanceof ForbiddenError) status = 403
+      else if (err instanceof BadRequestError) status = 400
+      else if (err instanceof NotFoundError) status = 404
+      // Insufficient funds is a well-formed request the server won't apply.
+      else if (err instanceof InsufficientFundsError) status = 422
+      return reply.code(status).send({ code: err.code, message: err.message })
     }
     request.log.error(err)
     return reply.code(500).send({ code: 500, message: 'internal server error' })

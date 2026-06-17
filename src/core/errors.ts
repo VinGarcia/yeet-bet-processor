@@ -2,7 +2,7 @@
  * Base domain error classes. Each carries a machine-readable numeric `code`
  * and a human-readable `message`. The core deliberately knows nothing about
  * HTTP: mapping a domain error to a transport status lives in the adapter
- * (see `httpStatusFor` in `apps/api/app.ts`).
+ * (the `setErrorHandler` in `apps/api/app.ts`).
  *
  * The numeric codes below are placeholder domain codes (documented in the
  * README as needing alignment with Yeet) and must NOT be read as HTTP status.

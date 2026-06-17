@@ -95,7 +95,7 @@ export function registerProcessController(app: FastifyInstance, repo: Repo): voi
     return reply.code(200).send({
       balance: result.balance,
       transactions: result.transactions.map((t) => ({ action_id: t.actionId, tx_id: t.txId })),
-      game_id: result.gameId,
+      game_id: gameId,
     })
   })
 }

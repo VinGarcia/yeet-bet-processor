@@ -20,3 +20,15 @@ export interface BetAction {
   actionId: string
   amount: number
 }
+
+/**
+ * A batch of actions to apply for one user/currency, with the optional game
+ * context the caller echoes back. `actions` are processed in request order.
+ */
+export interface UserActions {
+  userId: string
+  currency: string
+  game?: string
+  gameId?: string
+  actions: BetAction[]
+}
