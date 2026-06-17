@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify'
 import type { Repo } from '../../adapters/repo/contracts.js'
 import type { Action } from '../../core/entities.js'
 import { BadRequestError } from '../../core/errors.js'
+import { validateAction } from '../../core/validators.js'
 
 /**
  * The external request shape, after narrowing the parsed body. The aggregator
@@ -20,7 +21,8 @@ interface ProcessRequest {
  * share the same wire shape (string `action_id`, positive-integer `amount`);
  * they differ only by `action`, which the domain uses to pick debit vs credit.
  * `rollback` is a future slice and any other type is rejected as a bad request
- * (a 400 is safer than silently dropping or misapplying them).
+ * (a 400 is safer than silently dropping or misapplying them). The narrowed
+ * action's domain invariants are then enforced by the core `validateAction`.
  */
 function parseAction(raw: unknown): Action {
   if (typeof raw !== 'object' || raw === null) {
@@ -32,15 +34,12 @@ function parseAction(raw: unknown): Action {
   if (!('action_id' in raw) || typeof raw.action_id !== 'string') {
     throw new BadRequestError('action_id is required and must be a string')
   }
-  if (
-    !('amount' in raw) ||
-    typeof raw.amount !== 'number' ||
-    !Number.isInteger(raw.amount) ||
-    raw.amount <= 0
-  ) {
-    throw new BadRequestError('amount is required and must be a positive integer')
+  if (!('amount' in raw) || typeof raw.amount !== 'number') {
+    throw new BadRequestError('amount is required and must be a number')
   }
-  return { action: raw.action, actionId: raw.action_id, amount: raw.amount }
+  const action: Action = { action: raw.action, actionId: raw.action_id, amount: raw.amount }
+  validateAction(action)
+  return action
 }
 
 /**

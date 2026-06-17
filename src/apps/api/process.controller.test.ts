@@ -567,8 +567,7 @@ describe('POST /aggregator/takehome/process (win)', () => {
     expect(payload.balance).toBe(74322051)
     expect(payload.game_id).toBe('1761032910488163506')
     expect(payload.transactions.map((t) => t.action_id)).toEqual([betId, winId])
-    expect(payload.transactions[0]!.tx_id).toMatch(UUID_RE)
-    expect(payload.transactions[1]!.tx_id).toMatch(UUID_RE)
+    payload.transactions.forEach((t) => expect(t.tx_id).toMatch(UUID_RE))
 
     expect(await dbBalance(user, 'USD')).toBe(74322051)
     expect(await dbTxCount(user)).toBe(2)

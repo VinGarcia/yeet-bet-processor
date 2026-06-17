@@ -5,24 +5,6 @@ import type { UserActions, Wallet } from '../../../core/entities.js'
 import { InsufficientFundsError } from '../../../core/errors.js'
 import type { DB } from './schema.js'
 
-/** Postgres SQLSTATE for a unique-violation (e.g. the `UNIQUE(action_id)`). */
-const PG_UNIQUE_VIOLATION = '23505'
-
-/**
- * True when `err` is a Postgres unique-violation. The `pg` driver surfaces it as
- * a `DatabaseError` carrying SQLSTATE `23505` on its `code` field; we duck-type
- * the shape rather than importing the driver's error class, keeping this check
- * resilient to how the error is wrapped on its way up.
- */
-function isUniqueViolation(err: unknown): boolean {
-  return (
-    typeof err === 'object' &&
-    err !== null &&
-    'code' in err &&
-    (err as { code?: unknown }).code === PG_UNIQUE_VIOLATION
-  )
-}
-
 /**
  * Kysely-backed implementation of the {@link Repo} port. It owns all SQL/driver
  * concerns so the application core depends only on the abstraction.
@@ -62,225 +44,119 @@ export class KyselyRepo implements Repo {
    * Applies a batch of actions (`bet` debits, `win` credits) in a single
    * transaction:
    *
-   *   1. SELECT existing rows for the batch's `action_id`s (idempotency map).
-   *   2. The *new* actions (not already applied) each get a fresh `txId`.
-   *   3. With new actions present, *ensure-and-lock* the wallet row via a no-op
-   *      upsert (INSERT … ON CONFLICT DO UPDATE SET balance = wallets.balance
-   *      RETURNING balance). This atomically creates the row at 0 if it is
-   *      absent, takes a row lock either way (so concurrent first-action batches
-   *      for the same user serialize on it), and returns the current balance.
-   *      We then apply each new action IN REQUEST ORDER against a running
-   *      balance: a `bet` subtracts and the first one to drive the balance below
-   *      zero throws `InsufficientFundsError` (rolling the whole transaction
-   *      back); a `win` adds and never overdraws.
-   *   4. Write the computed final balance and bulk-INSERT the new ledger rows.
-   *      The DB `CHECK(balance >= 0)` stays as a backstop.
+   *   1. Dedup by `actionId` in request order (first wins), assigning each
+   *      unique action a fresh `txId`. Amount validity is the caller's contract
+   *      (enforced by the core `validateAction`); the repo trusts it.
+   *   2. Ensure-and-lock the wallet row: INSERT it at 0 if absent, else a no-op
+   *      DO UPDATE that still takes the row lock, so concurrent same-user batches
+   *      serialize here. Returns the current balance.
+   *   3. In ONE statement, insert the not-yet-persisted actions and read back
+   *      this user's already-persisted ones (replays).
+   *   4. Apply only the new actions in request order against the locked balance:
+   *      a `bet` debits and the first to go below zero throws
+   *      `InsufficientFundsError` (rolling the batch back); a `win` credits.
    *
-   * Contract: an action against a *non-existent* wallet lazily creates it at
-   * balance 0, so any positive bet still rejects via the per-step check (and the
-   * created-at-0 row is rolled back with the transaction). This removes the old
-   * silent-debit-loss bug where a bare UPDATE matched zero rows for a new user
-   * while the ledger insert still wrote, diverging wallet and ledger.
-   *
-   * With no new actions (all replays) it just reads the current balance — no
-   * lock, no write. The returned `transactions` array is in request order:
-   * replays carry their original `txId`, new actions carry the `id` generated
-   * here.
+   * An action against a non-existent wallet lazily creates it at 0, so a positive
+   * bet still rejects via the per-step check (the created-at-0 row rolls back with
+   * the transaction). The returned `transactions` are in request order (duplicates
+   * included), each with its tx id — original for replays, fresh for new.
    */
   async processActions(
-    input: UserActions,
+    userActions: UserActions,
   ): Promise<{ balance: number; transactions: { actionId: string; txId: string }[] }> {
-    const { userId, currency, actions } = input
+    const { userId, currency, game, gameId, actions } = userActions
 
-    try {
-      return await this.applyBatch(input)
-    } catch (err) {
-      // BUG 2 — concurrent submission of the SAME brand-new action_id. The
-      // up-front idempotency SELECT is unlocked and the wallet row lock does not
-      // cover the transactions table, so two concurrent requests can both treat
-      // the action as new. The first commits its ledger row; the second's INSERT
-      // hits UNIQUE(action_id) → 23505, which ABORTS that transaction (any
-      // further statement on it would fail with "current transaction is
-      // aborted"). So we let it roll back, then — in a FRESH transaction — re-read
-      // the now-committed rows by action_id and return their ORIGINAL tx ids.
-      // Semantics: the concurrent duplicate is treated as an idempotent REPLAY,
-      // not a domain error, so the raw 23505 never leaks past this adapter.
-      if (!isUniqueViolation(err)) throw err
-      return this.readAsReplay(userId, currency, actions, err)
-    }
-  }
+    // Dedup by actionId in request order, assigning each a fresh txId now (shared
+    // by the insert and the response). Postgres can't express our ordered,
+    // per-step balance check, so a within-batch duplicate must collapse here or
+    // it would debit twice against the single UNIQUE(action_id) ledger row.
+    const seen = new Set<string>()
+    const uniqueActions = actions
+      .filter((a) => !seen.has(a.actionId) && seen.add(a.actionId))
+      .map((a) => ({ ...a, txId: randomUUID() }))
 
-  /**
-   * Re-reads a batch whose ledger inserts already committed (lost a concurrency
-   * race on `UNIQUE(action_id)`) as a pure idempotent replay: in a fresh
-   * transaction it maps every `action_id` to its committed original tx id and
-   * reads the current wallet balance. Mirrors the all-replays path of
-   * {@link applyBatch}, only sourcing the tx ids from the just-committed rows.
-   */
-  private async readAsReplay(
-    userId: string,
-    currency: string,
-    actions: UserActions['actions'],
-    cause: unknown,
-  ): Promise<{ balance: number; transactions: { actionId: string; txId: string }[] }> {
     return this.db.transaction().execute(async (trx) => {
-      const committed = await trx
-        .selectFrom('transactions')
-        .where(
-          'action_id',
-          'in',
-          actions.map((a) => a.actionId),
-        )
-        .select(['id', 'action_id'])
-        .execute()
-      const txByAction = new Map(committed.map((row) => [row.action_id, row.id]))
-
+      // Ensure-and-lock the wallet row. The lock serializes concurrent same-user
+      // batches, so a concurrently-submitted duplicate action_id is seen as an
+      // existing replay below (step 3) instead of racing into a second row.
       const wallet = await trx
-        .selectFrom('wallets')
-        .where('user_id', '=', userId)
-        .where('currency', '=', currency)
-        .select('balance')
-        .executeTakeFirst()
-      const balance = wallet === undefined ? 0 : Number(wallet.balance)
-
-      const transactions = actions.map((a) => {
-        const txId = txByAction.get(a.actionId)
-        // In the concurrent-identical-replay case the racing writer has committed
-        // every action_id in this batch, so each lookup hits. If one is still
-        // missing, the 23505 was not a clean replay of these exact actions (e.g.
-        // a partial overlap whose own batch rolled back atomically) — we cannot
-        // honestly resolve it as a replay, so we surface the original violation
-        // rather than fabricate or assert a tx id.
-        if (txId === undefined) throw cause
-        return { actionId: a.actionId, txId }
-      })
-      return { balance, transactions }
-    })
-  }
-
-  /**
-   * Applies the batch in a single transaction (the happy path). May throw
-   * `InsufficientFundsError` (a deliberate rollback) or, when it loses a
-   * concurrency race on `UNIQUE(action_id)`, a Postgres unique violation that
-   * {@link processActions} translates into an idempotent replay.
-   */
-  private async applyBatch(
-    input: UserActions,
-  ): Promise<{ balance: number; transactions: { actionId: string; txId: string }[] }> {
-    const { userId, currency, game, gameId, actions } = input
-
-    return this.db.transaction().execute(async (trx) => {
-      // 1. Map already-persisted action_ids to their original tx id.
-      const existing = await trx
-        .selectFrom('transactions')
-        .where(
-          'action_id',
-          'in',
-          actions.map((a) => a.actionId),
+        .insertInto('wallets')
+        .values({ user_id: userId, currency, balance: 0 })
+        .onConflict((oc) =>
+          oc
+            .columns(['user_id', 'currency'])
+            .doUpdateSet({ balance: (eb) => eb.ref('wallets.balance') }),
         )
-        .select(['id', 'action_id'])
-        .execute()
-      const appliedTxByAction = new Map(existing.map((row) => [row.action_id, row.id]))
+        .returning('balance')
+        .executeTakeFirstOrThrow()
+      const startBalance = Number(wallet.balance)
 
-      // 2. New bets are those not already applied; assign each a fresh tx id now
-      // so the response mapping and the ledger insert share the same value. We
-      // also dedupe by action_id WITHIN this batch, keeping only the first
-      // occurrence: a duplicate action_id in one request is an idempotent replay
-      // of itself, so both response slots must resolve to that one tx id and the
-      // debit must happen once. Without this, both occurrences would pass the
-      // (unlocked) idempotency SELECT, get distinct tx ids, debit twice, and then
-      // collide on the UNIQUE(action_id) ledger insert (a raw 23505 → 500).
-      const seen = new Set<string>()
-      const newActions = actions
-        .filter(
-          (a) =>
-            !appliedTxByAction.has(a.actionId) && !seen.has(a.actionId) && seen.add(a.actionId),
+      // Insert the new actions and return this user's existing (replay) rows in
+      // one statement: `existing` finds the replays; `ins` inserts only the rest
+      // (a data-modifying CTE always runs to completion, even though the final
+      // SELECT reads only `existing`). The first VALUES row casts the columns so
+      // the CTE carries uuid/text/bigint types.
+      const inputRows = sql.join(
+        uniqueActions.map((a, i) =>
+          i === 0
+            ? sql`(${a.actionId}::uuid, ${a.txId}::uuid, ${a.action}::text, ${a.amount}::bigint)`
+            : sql`(${a.actionId}, ${a.txId}, ${a.action}, ${a.amount})`,
+        ),
+      )
+
+      const existingRows = await sql<{ action_id: string; id: string }>`
+        WITH input(action_id, tx_id, type, amount) AS (
+          VALUES ${inputRows}
+        ),
+        existing AS (
+          SELECT action_id, id FROM transactions
+          WHERE action_id IN (SELECT action_id FROM input)
+            AND user_id = ${userId}
+            AND currency = ${currency}
+        ),
+        ins AS (
+          INSERT INTO transactions (id, action_id, user_id, currency, game, game_id, type, amount)
+          SELECT tx_id, action_id, ${userId}, ${currency}, ${game ?? null}, ${gameId ?? null}, type, amount
+            FROM input
+          WHERE action_id NOT IN (SELECT action_id FROM existing)
         )
-        .map((a) => ({ ...a, txId: randomUUID() }))
+        SELECT action_id, id FROM existing
+      `.execute(trx)
 
-      let balance: number
-      if (newActions.length > 0) {
-        // 3. Ensure-and-lock the wallet row in one statement: INSERT the row at
-        // balance 0 if absent, else a no-op DO UPDATE (balance = wallets.balance)
-        // that still takes the row lock. Either way we get a locked row back and
-        // its current balance, so concurrent first-bet batches for the same user
-        // serialize here instead of racing a row that does not exist yet.
-        const wallet = await trx
-          .insertInto('wallets')
-          .values({ user_id: userId, currency, balance: 0 })
-          .onConflict((oc) =>
-            oc
-              .columns(['user_id', 'currency'])
-              .doUpdateSet({ balance: (eb) => eb.ref('wallets.balance') }),
-          )
-          .returning('balance')
-          .executeTakeFirstOrThrow()
-        balance = Number(wallet.balance)
+      // Map each replayed actionId to its original txId; everything else is new.
+      const replayTxByAction = new Map(existingRows.rows.map((r) => [r.action_id, r.id]))
 
-        // Apply each new action in request order against the running balance.
-        // A `bet` debits and may overdraw — the first one that drives the
-        // balance below zero fails the whole request (a rollback, since we
-        // throw in-trx). A `win` credits and never overdraws. The per-step
-        // (not net) check is what makes [bet 100, win 200] on balance 50 reject
-        // at the bet even though the net (+100) is positive.
-        for (const action of newActions) {
-          if (action.action === 'bet') {
-            balance -= action.amount
-            if (balance < 0) throw new InsufficientFundsError()
-          } else {
-            balance += action.amount
-          }
+      // Apply only the new actions in request order against the locked balance.
+      let balance = startBalance
+      for (const action of uniqueActions) {
+        if (replayTxByAction.has(action.actionId)) continue
+        if (action.action === 'bet') {
+          balance -= action.amount
+          if (balance < 0) throw new InsufficientFundsError()
+        } else {
+          balance += action.amount
         }
+      }
 
-        // 4. Write the computed final balance, then bulk-insert the ledger rows.
+      // Persist only when the balance changed (an all-replay batch leaves it
+      // untouched). The DB CHECK(balance >= 0) stays as a backstop.
+      if (balance !== startBalance) {
         await trx
           .updateTable('wallets')
           .set({ balance, updated_at: sql`now()` })
           .where('user_id', '=', userId)
           .where('currency', '=', currency)
           .execute()
-
-        await trx
-          .insertInto('transactions')
-          .values(
-            newActions.map((a) => ({
-              id: a.txId,
-              action_id: a.actionId,
-              user_id: userId,
-              currency,
-              game: game ?? null,
-              game_id: gameId ?? null,
-              // The action type ('bet' | 'win') encodes debit vs credit;
-              // `amount` is stored as the positive integer either way.
-              type: a.action,
-              amount: a.amount,
-              original_action_id: null,
-            })),
-          )
-          .execute()
-      } else {
-        // All replays: nothing to apply, just read the current balance. This
-        // read is deliberately *unlocked* — with no new bets there is no write,
-        // so there is nothing to serialize against and no need for a row lock.
-        const wallet = await trx
-          .selectFrom('wallets')
-          .where('user_id', '=', userId)
-          .where('currency', '=', currency)
-          .select('balance')
-          .executeTakeFirst()
-        balance = wallet === undefined ? 0 : Number(wallet.balance)
       }
 
-      // Build the response in request order: replay → original id, new → fresh.
-      const newTxByAction = new Map(newActions.map((a) => [a.actionId, a.txId]))
+      // Response in request order (duplicates included): a replay keeps its
+      // original txId, a new action the one generated above. `newTxByAction` is
+      // keyed by every unique actionId (it's built from the dedup of `actions`),
+      // so the `??` fallback always hits for a non-replay — the `!` is total.
+      const newTxByAction = new Map(uniqueActions.map((a) => [a.actionId, a.txId]))
       const transactions = actions.map((a) => ({
         actionId: a.actionId,
-        // Invariant: every action is either a replay (in `appliedTxByAction`) or
-        // new (in `newTxByAction`) — `newActions` is exactly the actions not in the
-        // applied map — so one of the two lookups always hits. The `!` is thus
-        // provably safe: the `??` falls through only for a new action, which is
-        // guaranteed to be in `newTxByAction`.
-        txId: appliedTxByAction.get(a.actionId) ?? newTxByAction.get(a.actionId)!,
+        txId: replayTxByAction.get(a.actionId) ?? newTxByAction.get(a.actionId)!,
       }))
 
       return { balance, transactions }
