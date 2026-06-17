@@ -17,7 +17,7 @@ beforeAll(async () => {
   container = await new PostgreSqlContainer('postgres:17-alpine').start()
   const pool = new Pool({ connectionString: container.getConnectionUri() })
   db = new Kysely<DB>({ dialect: new PostgresDialect({ pool }) })
-  app = await buildApp({ db })
+  app = await buildApp({ db, hmacSecret: 'test' })
   await app.listen({ port: 0, host: '127.0.0.1' })
   const address = app.server.address() as AddressInfo
   baseURL = `http://127.0.0.1:${address.port}`

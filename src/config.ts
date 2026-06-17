@@ -13,9 +13,11 @@ function required(name: string): string {
 export interface Config {
   port: number
   databaseUrl: string
+  hmacSecret: string
 }
 
 export const config: Config = {
   port: process.env.PORT !== undefined && process.env.PORT !== '' ? Number(process.env.PORT) : 3000,
   databaseUrl: required('DATABASE_URL'),
+  hmacSecret: required('HMAC_SECRET'),
 }

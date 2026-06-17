@@ -8,7 +8,7 @@ async function main(): Promise<void> {
   const pool = new Pool({ connectionString: config.databaseUrl })
   const db = new Kysely<DB>({ dialect: new PostgresDialect({ pool }) })
 
-  const app = await buildApp({ db })
+  const app = await buildApp({ db, hmacSecret: config.hmacSecret })
 
   await app.listen({ port: config.port, host: '0.0.0.0' })
   app.log.info(`server listening on port ${config.port}`)
