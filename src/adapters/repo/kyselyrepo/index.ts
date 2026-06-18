@@ -1,9 +1,44 @@
 import { randomUUID } from 'node:crypto'
-import { sql, type Kysely } from 'kysely'
+import { sql, type Kysely, type Selectable } from 'kysely'
 import type { Repo } from '../contracts.js'
 import type { UserActions, Wallet } from '../../../core/entities.js'
-import { InsufficientFundsError } from '../../../core/errors.js'
-import type { DB } from './schema.js'
+import { validateAction } from '../../../core/validators.js'
+import { BadRequestError, InsufficientFundsError } from '../../../core/errors.js'
+import type { DB, TransactionsTable } from './schema.js'
+
+/**
+ * A `transactions` row in the camelCase domain shape, with `amount` as a JS
+ * number (the driver returns the `bigint` as a string). {@link parseTxFromDB}
+ * maps a stored snake_case row into this shape.
+ */
+export type Transaction = {
+  id: string
+  actionId: string
+  userId: string
+  currency: string
+  game: string | null
+  gameId: string | null
+  type: string
+  amount: number
+  originalActionId: string | null
+  rolledBack: boolean
+}
+
+/** Maps a stored `transactions` row to the camelCase {@link Transaction}. */
+function parseTxFromDB(row: Selectable<TransactionsTable>): Transaction {
+  return {
+    id: row.id,
+    actionId: row.action_id,
+    userId: row.user_id,
+    currency: row.currency,
+    game: row.game,
+    gameId: row.game_id,
+    type: row.type,
+    amount: Number(row.amount),
+    originalActionId: row.original_action_id,
+    rolledBack: row.rolledback,
+  }
+}
 
 /**
  * Kysely-backed implementation of the {@link Repo} port. It owns all SQL/driver
@@ -41,20 +76,29 @@ export class KyselyRepo implements Repo {
   }
 
   /**
-   * Applies a batch of actions (`bet` debits, `win` credits) in a single
-   * transaction:
+   * Applies a batch of actions (`bet` debits, `win` credits, `rollback`
+   * reverses) in a single transaction:
    *
    *   1. Dedup by `actionId` in request order (first wins), assigning each
-   *      unique action a fresh `txId`. Amount validity is the caller's contract
+   *      unique action a fresh `txId`. Validity is the caller's contract
    *      (enforced by the core `validateAction`); the repo trusts it.
    *   2. Ensure-and-lock the wallet row: INSERT it at 0 if absent, else a no-op
    *      DO UPDATE that still takes the row lock, so concurrent same-user batches
    *      serialize here. Returns the current balance.
-   *   3. In ONE statement, insert the not-yet-persisted actions and read back
-   *      this user's already-persisted ones (replays).
-   *   4. Apply only the new actions in request order against the locked balance:
-   *      a `bet` debits and the first to go below zero throws
-   *      `InsufficientFundsError` (rolling the batch back); a `win` credits.
+   *   3. ONE context SELECT gathers everything the in-order pass needs: this
+   *      user's already-persisted batch rows (replays), any referenced originals
+   *      (to reverse, or to detect a rollback-of-a-rollback), and any committed
+   *      rollback already targeting a referenced original (to detect a double
+   *      rollback).
+   *   4. In-order pass against the locked balance, building the rows to insert:
+   *      a `bet` debits (first to go below zero throws `InsufficientFundsError`),
+   *      a `win` credits, a `rollback` reverses its original (OPPOSITE direction:
+   *      a bet's rollback credits, a win's debits — a win clawback that overdraws
+   *      throws `InsufficientFundsError` too). A rollback of a not-yet-seen
+   *      original is RECORDED with amount 0 and no balance change (pre-rollback);
+   *      the later original then becomes a NOOP (recorded, no balance effect).
+   *      Double rollback and rollback-of-a-rollback throw `BadRequestError`.
+   *   5. Bulk-insert the recorded rows; update the wallet only if it changed.
    *
    * An action against a non-existent wallet lazily creates it at 0, so a positive
    * bet still rejects via the per-step check (the created-at-0 row rolls back with
@@ -66,19 +110,36 @@ export class KyselyRepo implements Repo {
   ): Promise<{ balance: number; transactions: { actionId: string; txId: string }[] }> {
     const { userId, currency, game, gameId, actions } = userActions
 
-    // Dedup by actionId in request order, assigning each a fresh txId now (shared
-    // by the insert and the response). Postgres can't express our ordered,
-    // per-step balance check, so a within-batch duplicate must collapse here or
-    // it would debit twice against the single UNIQUE(action_id) ledger row.
+    for (const action of actions) validateAction(action)
+
+    // Dedup by actionId in request order, assigning each a fresh txId now.
     const seen = new Set<string>()
     const uniqueActions = actions
       .filter((a) => !seen.has(a.actionId) && seen.add(a.actionId))
       .map((a) => ({ ...a, txId: randomUUID() }))
 
+    const batchActionIds = new Set(uniqueActions.map((a) => a.actionId))
+
+    // The originals every rollback in this batch references. (Includes replayed
+    // rollbacks' targets — harmless: a replayed rollback's target is already a
+    // committed rollback target, so it only ever produces a correct noop.)
+    const referencedOriginalIds = uniqueActions
+      .filter((a) => a.action === 'rollback')
+      .map((a) => a.originalActionId)
+
+    // The action_ids of every rollback in this batch. Used to reject a
+    // rollback-of-a-rollback regardless of the two rollbacks' order in the batch.
+    const batchRollbackActionIds = new Set(
+      uniqueActions.filter((a) => a.action === 'rollback').map((a) => a.actionId),
+    )
+
+    // Every id we need context for: this batch's action_ids (replay candidates)
+    // plus the originals any rollback references.
+    const lookupIds = [...new Set([...batchActionIds, ...referencedOriginalIds])]
+
     return this.db.transaction().execute(async (trx) => {
-      // Ensure-and-lock the wallet row. The lock serializes concurrent same-user
-      // batches, so a concurrently-submitted duplicate action_id is seen as an
-      // existing replay below (step 3) instead of racing into a second row.
+      // Ensure-and-lock the wallet row from start to prevent
+      // issues with concurrent writes to the same rows.
       const wallet = await trx
         .insertInto('wallets')
         .values({ user_id: userId, currency, balance: 0 })
@@ -91,55 +152,190 @@ export class KyselyRepo implements Repo {
         .executeTakeFirstOrThrow()
       const startBalance = Number(wallet.balance)
 
-      // Insert the new actions and return this user's existing (replay) rows in
-      // one statement: `existing` finds the replays; `ins` inserts only the rest
-      // (a data-modifying CTE always runs to completion, even though the final
-      // SELECT reads only `existing`). The first VALUES row casts the columns so
-      // the CTE carries uuid/text/bigint types.
-      const inputRows = sql.join(
-        uniqueActions.map((a, i) =>
-          i === 0
-            ? sql`(${a.actionId}::uuid, ${a.txId}::uuid, ${a.action}::text, ${a.amount}::bigint)`
-            : sql`(${a.actionId}, ${a.txId}, ${a.action}, ${a.amount})`,
+      // Pre-fetch transactions we need to properly validate business logic:
+      // 1. All transactions that we received that might already exist on the DB
+      // 2. All transactions that were rolled back by one of the actions in this batch
+      // 3. All rollback transactions too, so we avoid rolling back the same actionId twice.
+      const contextRows = await trx
+        .selectFrom('transactions')
+        .where('user_id', '=', userId)
+        .where('currency', '=', currency)
+        .where((eb) =>
+          eb.or([
+            eb('action_id', 'in', lookupIds),
+            eb.and([eb('type', '=', 'rollback'), eb('original_action_id', 'in', lookupIds)]),
+          ]),
+        )
+        .selectAll()
+        .execute()
+
+      // Index every already-committed row we fetched by actionId: a replay reads
+      // back its `id` (original txId), and a rollback reads its referenced
+      // original's `type`/`amount` to reverse the balance.
+      const existingDbTransactions = new Map<string, Transaction>()
+      for (const row of contextRows) {
+        const tx = parseTxFromDB(row)
+        existingDbTransactions.set(tx.actionId, tx)
+      }
+
+      // Originals reversed by a COMMITTED rollback (in a prior call); a non-null
+      // originalActionId names the action a rollback reversed.
+      const committedRollbackTargets = new Set(
+        [...existingDbTransactions.values()].flatMap((tx) =>
+          tx.originalActionId !== null ? [tx.originalActionId] : [],
         ),
       )
 
-      const existingRows = await sql<{ action_id: string; id: string }>`
-        WITH input(action_id, tx_id, type, amount) AS (
-          VALUES ${inputRows}
-        ),
-        existing AS (
-          SELECT action_id, id FROM transactions
-          WHERE action_id IN (SELECT action_id FROM input)
-            AND user_id = ${userId}
-            AND currency = ${currency}
-        ),
-        ins AS (
-          INSERT INTO transactions (id, action_id, user_id, currency, game, game_id, type, amount)
-          SELECT tx_id, action_id, ${userId}, ${currency}, ${game ?? null}, ${gameId ?? null}, type, amount
-            FROM input
-          WHERE action_id NOT IN (SELECT action_id FROM existing)
-        )
-        SELECT action_id, id FROM existing
-      `.execute(trx)
+      // Every original cancelled by a rollback — committed, or ANYWHERE in this
+      // batch (the batch's rollback targets are pre-populated up front). A bet/win
+      // whose id is here is a NOOP: never applied to the balance, regardless of
+      // whether its rollback comes before or after it in the request. This makes
+      // [bet A, rollback A] and [rollback A, bet A] behave identically and removes
+      // the apply-then-reverse path. See README "Rollback ordering".
+      const rolledbackActionIds = new Set([...committedRollbackTargets, ...referencedOriginalIds])
 
-      // Map each replayed actionId to its original txId; everything else is new.
-      const replayTxByAction = new Map(existingRows.rows.map((r) => [r.action_id, r.id]))
-
-      // Apply only the new actions in request order against the locked balance.
+      // In-order pass: maintain the running balance and the rows to insert, keyed
+      // by actionId (unique per row). A row carries the per-action columns only —
+      // the constant user/currency/game columns are filled at insert time from the
+      // closure. The map also lets a rollback look up a same-batch original to
+      // reject a rollback-of-a-rollback (its `type`).
       let balance = startBalance
+      const rowsToInsert = new Map<
+        string,
+        {
+          id: string
+          actionId: string
+          type: string
+          amount: number
+          originalActionId: string | null
+          rolledBack: boolean
+        }
+      >()
+      // Originals reversed so far (committed seed, grown per rollback). A rollback
+      // of an already-reversed original is a 400 double-rollback. (Distinct from
+      // rolledbackActionIds, which is the full pre-populated set used for noops.)
+      const reversedOriginals = new Set(committedRollbackTargets)
+      // Originals committed in a PRIOR call that a rollback in this batch reverses:
+      // flagged with one batched UPDATE after the insert (no per-action round-trip).
+      const priorCallOriginalsToFlag = new Set<string>()
+
       for (const action of uniqueActions) {
-        if (replayTxByAction.has(action.actionId)) continue
-        if (action.action === 'bet') {
-          balance -= action.amount
-          if (balance < 0) throw new InsufficientFundsError()
-        } else {
-          balance += action.amount
+        // Replay: already persisted, never re-applied — keep its original txId.
+        if (existingDbTransactions.has(action.actionId)) continue
+
+        if (action.action === 'bet' || action.action === 'win') {
+          // A bet/win cancelled by a rollback (committed, or anywhere in this
+          // batch) is a NOOP: recorded for idempotency and flagged rolledBack, but
+          // never applied to the balance — so request order doesn't matter and a
+          // bet rolled back in the same batch never trips the per-step funds check.
+          if (rolledbackActionIds.has(action.actionId)) {
+            rowsToInsert.set(action.actionId, {
+              id: action.txId,
+              actionId: action.actionId,
+              type: action.action,
+              amount: action.amount,
+              originalActionId: null,
+              rolledBack: true,
+            })
+            continue
+          }
+          if (action.action === 'bet') {
+            balance -= action.amount
+            if (balance < 0) throw new InsufficientFundsError()
+          } else {
+            balance += action.amount
+          }
+          rowsToInsert.set(action.actionId, {
+            id: action.txId,
+            actionId: action.actionId,
+            type: action.action,
+            amount: action.amount,
+            originalActionId: null,
+            rolledBack: false,
+          })
+          continue
+        }
+
+        // If it gets here its a rollback action:
+        const origId = action.originalActionId
+
+        // Double rollback: this original was already reversed — committed, or by an
+        // earlier rollback in this same batch.
+        if (reversedOriginals.has(origId)) {
+          throw new BadRequestError('original action has already been rolled back')
+        }
+        // Rollback-of-a-rollback: the referenced id is itself a rollback —
+        // committed, or ANYWHERE in this batch (order-independent).
+        const committedOriginal = existingDbTransactions.get(origId)
+        if (committedOriginal?.type === 'rollback' || batchRollbackActionIds.has(origId)) {
+          throw new BadRequestError('cannot roll back a rollback')
+        }
+        reversedOriginals.add(origId)
+
+        // Rollback rows always store amount 0: the reversal reads the original's
+        // amount, RTP ignores type='rollback' rows, and replays never recompute —
+        // so the stored amount is never read back.
+        rowsToInsert.set(action.actionId, {
+          id: action.txId,
+          actionId: action.actionId,
+          type: action.action,
+          amount: 0,
+          originalActionId: origId,
+          rolledBack: false,
+        })
+
+        // Reverse ONLY a prior-committed original: a same-batch one was noop'd
+        // above (never applied), so there is nothing to undo. The committed
+        // original is flagged via the one batched UPDATE after the insert.
+        if (committedOriginal !== undefined) {
+          if (committedOriginal.type === 'bet') {
+            balance += committedOriginal.amount
+          } else {
+            balance -= committedOriginal.amount
+            if (balance < 0) throw new InsufficientFundsError()
+          }
+          priorCallOriginalsToFlag.add(origId)
         }
       }
 
-      // Persist only when the balance changed (an all-replay batch leaves it
-      // untouched). The DB CHECK(balance >= 0) stays as a backstop.
+      // Bulk-insert the recorded rows (skip when an all-replay batch recorded none).
+      // The constant user/currency/game columns come from the closure; only the
+      // per-action fields vary, so we encode each row to its snake_case shape here.
+      if (rowsToInsert.size > 0) {
+        await trx
+          .insertInto('transactions')
+          .values(
+            [...rowsToInsert.values()].map((row) => ({
+              id: row.id,
+              action_id: row.actionId,
+              user_id: userId,
+              currency,
+              game: game ?? null,
+              game_id: gameId ?? null,
+              type: row.type,
+              amount: row.amount,
+              original_action_id: row.originalActionId,
+              rolledback: row.rolledBack,
+            })),
+          )
+          .execute()
+      }
+
+      // ONE batched UPDATE flips `rolledback` on prior-call originals reversed by
+      // a rollback in this batch (same-batch originals were set in memory above).
+      // Kept to a single statement to preserve the fixed-statement-count discipline.
+      if (priorCallOriginalsToFlag.size > 0) {
+        await trx
+          .updateTable('transactions')
+          .set({ rolledback: true })
+          .where('user_id', '=', userId)
+          .where('currency', '=', currency)
+          .where('action_id', 'in', [...priorCallOriginalsToFlag])
+          .execute()
+      }
+
+      // Persist only when the balance changed (an all-replay / all-noop batch
+      // leaves it untouched). The DB CHECK(balance >= 0) stays as a backstop.
       if (balance !== startBalance) {
         await trx
           .updateTable('wallets')
@@ -156,7 +352,7 @@ export class KyselyRepo implements Repo {
       const newTxByAction = new Map(uniqueActions.map((a) => [a.actionId, a.txId]))
       const transactions = actions.map((a) => ({
         actionId: a.actionId,
-        txId: replayTxByAction.get(a.actionId) ?? newTxByAction.get(a.actionId)!,
+        txId: existingDbTransactions.get(a.actionId)?.id ?? newTxByAction.get(a.actionId)!,
       }))
 
       return { balance, transactions }

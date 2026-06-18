@@ -41,19 +41,78 @@ WIP.
   front and is never applied twice; the replay returns the original `tx_id`, so
   retries and at-least-once delivery from the aggregator are safe. A duplicate
   `action_id` — whether it appears **twice within one batch** or arrives as a
-  **concurrent submission of the same brand-new id** — is also resolved as an
+  **concurrent submission of the same brand-new id** — is resolved as an
   idempotent replay, not an error: (a) within a batch we dedupe by `action_id`
   before applying, keeping the first occurrence so the debit happens once and both
-  response slots carry the same `tx_id`; (b) for a concurrent race the up-front
-  lookup is unlocked and the wallet lock does not cover the ledger, so the loser's
-  insert hits `UNIQUE(action_id)` (`23505`) and aborts its transaction — we catch
-  that violation, then in a **fresh transaction** re-read the now-committed rows by
-  `action_id` and return their **original** `tx_id`s (the standard insert-or-get
-  pattern). Either way the raw `23505` never leaks past the adapter.
+  response slots carry the same `tx_id`; (b) for a concurrent race the detection
+  is lock-based, not a `23505` catch. Each batch first does an ensure-and-lock
+  wallet upsert that serializes same-`(user, currency)` batches; the loser blocks
+  until the winner commits, then — still inside its own transaction, after the
+  lock — its **context SELECT** sees the now-committed row by `action_id` and
+  returns that **original** `tx_id` instead of re-inserting. The `UNIQUE(action_id)`
+  constraint remains as a backstop, but under the wallet lock the duplicate insert
+  is never attempted, so a raw `23505` never reaches the adapter's happy path.
+- **Rollback semantics.** A `rollback` carries `original_action_id` and **no
+  `amount`** (the amount is derived from the referenced original). It reverses
+  the original in the **opposite** direction: rolling back a `bet` **credits**
+  the amount back; rolling back a `win` **debits** (claws back) it. Both bets and
+  wins are reversible.
+  - **Pre-rollback (spec hard requirement).** A rollback that references a
+    not-yet-seen original is **recorded** (a `rollback` row with `amount = 0`,
+    no balance change) and still returns a `tx_id`. When the original `bet`/`win`
+    later arrives — a future request *or* later in the same batch — it becomes a
+    **noop**: persisted (so it has a `tx_id` and idempotency holds) but with no
+    balance effect.
+  - **Rollback ordering within a batch (order-independent noop).** A `bet`/`win`
+    cancelled by a rollback **anywhere in the same batch** is a noop, whether the
+    rollback comes before or after it. We pre-populate the set of rolled-back
+    originals from the whole batch up front, so the in-order pass simply never
+    applies a cancelled `bet`/`win` to the balance — rather than applying it and
+    reversing it later. Two deliberate consequences: (1) `[bet A, rollback A]` and
+    `[rollback A, bet A]` behave identically; (2) a `bet` that would overdraw is
+    **not** rejected if the same batch rolls it back — the per-step
+    insufficient-funds check only sees actions that actually take effect. We chose
+    this over apply-then-reverse because order-independence is far easier to reason
+    about and there is no value in failing a bet the same request cancels. Only
+    **committed** (prior-call) originals are ever reversed against the balance;
+    same-batch ones never landed.
+  - **Clawback overdraw.** Rolling back a **committed** (prior-call) win debits the
+    credited amount; if that would drive the balance below zero it is rejected with
+    the **same** insufficient-funds domain code `100` as a bet, rolling the whole
+    batch back. (A same-batch win is noop'd, never credited, so there is nothing to
+    claw back.)
+  - **Rejected cases → HTTP `400`.** A **double rollback** (a second, distinct
+    rollback `action_id` targeting an original that already has a rollback,
+    committed or earlier in the same batch) and a **rollback-of-a-rollback**
+    (`original_action_id` points at a `rollback` row) are rejected with
+    `BadRequestError` → `400`. The spec defines no domain code for these, so they
+    reuse `400` pending alignment with Yeet (the controller likewise rejects a
+    rollback with a missing/non-string `original_action_id` with `400`).
+  - **Idempotency** is unchanged: a replayed `action_id` (including a replayed
+    rollback) returns its original `tx_id` and is not re-applied.
+  - **`rolledback` denormalization (for RTP at scale).** Each ledger row carries
+    a `rolledback` boolean. An original (`bet`/`win`) is set `true` the moment a
+    rollback reverses it; **rollback rows themselves stay `false`** (and keep
+    `amount = 0` — the reversal reads the original's amount in memory, never the
+    rollback row's). The future RTP query can then filter
+    `WHERE type <> 'rollback' AND rolledback = false` — a plain indexable
+    predicate — instead of an anti-join (`NOT EXISTS` against the rollback rows)
+    that grows more expensive as the ledger does. It is written on the path that
+    already knows the reversal happened, so it costs no extra round-trip per
+    action: a **same-batch** cancelled original is noop'd, so its row is written
+    with `rolledback = true` directly, and **prior-call** (committed) originals are
+    flagged with a single batched `UPDATE … WHERE action_id IN (…)` inside the same
+    transaction. The flag is a
+    denormalization of "a rollback row with this `original_action_id` exists", so
+    it stays correct only because a double rollback is rejected — an original is
+    reversed at most once.
 - **Small, fixed set of statements, not a giant CTE.** Each batch runs a constant
-  number of statements regardless of size: select existing action_ids, one locked
-  balance read, one wallet update to the computed balance, one bulk ledger insert.
-  The per-bet balance check is plain in-memory arithmetic in the app, not SQL.
+  number of statements regardless of size: one ensure-and-lock wallet upsert
+  (also the locked balance read), one **context SELECT** (replays + any rollback
+  originals/targets), one bulk ledger insert, at most one batched `UPDATE` to
+  flag prior-call originals as `rolledback`, and one wallet update to the
+  computed balance. The per-step balance check and rollback resolution are plain
+  in-memory logic in the app, not SQL.
   This keeps the SQL readable and debuggable; a single all-in-one CTE would be far
   harder to reason about for no real throughput gain at these batch sizes.
 

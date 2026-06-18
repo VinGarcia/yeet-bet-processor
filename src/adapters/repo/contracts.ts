@@ -14,12 +14,15 @@ export interface Repo {
   findWallet(userId: string, currency: string): Promise<Wallet | undefined>
 
   /**
-   * Applies a batch of actions (`bet` debits, `win` credits) atomically in a
-   * single DB transaction. Idempotent on `actionId`: an action already persisted
-   * is not re-applied and reuses its original `txId`. New actions are applied in
-   * request order against a running balance read under a row lock; the first
-   * `bet` that would drive the balance below zero throws `InsufficientFundsError`
-   * and rolls the whole batch back (wins never overdraw).
+   * Applies a batch of actions (`bet` debits, `win` credits, `rollback`
+   * reverses) atomically in a single DB transaction. Idempotent on `actionId`:
+   * an action already persisted is not re-applied and reuses its original
+   * `txId`. New actions are applied in request order against a running balance
+   * read under a row lock; the first `bet` (or win clawback) that would drive
+   * the balance below zero throws `InsufficientFundsError` and rolls the whole
+   * batch back (wins never overdraw). A `rollback` reverses its referenced
+   * original in the opposite direction; one referencing a not-yet-seen original
+   * is recorded so that original later becomes a noop (pre-rollback).
    */
   processActions(
     input: UserActions,

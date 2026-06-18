@@ -31,6 +31,11 @@ export interface TransactionsTable {
   // Stored as Postgres `bigint`: read back as a `string`, written as a `number`.
   amount: ColumnType<string, number, number>
   original_action_id: string | null
+  // Denormalized "this original was reversed" flag. Defaults to false at the DB;
+  // set true on an original (bet/win) when a rollback reverses it (in memory for
+  // a same-batch original, via a batched UPDATE for a prior-call one). Rollback
+  // rows themselves stay false. Lets the RTP query skip a rollback anti-join.
+  rolledback: ColumnType<boolean, boolean | undefined, boolean>
   // Defaulted server-side and managed by the DB; never written by inserts.
   created_at: ColumnType<Date, never, Date>
 }

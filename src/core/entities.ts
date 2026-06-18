@@ -33,11 +33,25 @@ export interface WinAction {
 }
 
 /**
- * A single action to apply, discriminated on `action`. The direction (debit vs
- * credit) is encoded by the variant, not by the sign of `amount` (always > 0).
- * `rollback` is a future slice and not modelled yet.
+ * A single rollback within a process request, in the camelCase domain shape. It
+ * reverses a prior `bet` or `win` referenced by `originalActionId` — the
+ * direction is the OPPOSITE of the original (a bet's rollback credits, a win's
+ * debits). It carries NO `amount`: the amount is derived from the referenced
+ * original. A rollback that arrives before its original is recorded so the
+ * later original becomes a noop (pre-rollback).
  */
-export type Action = BetAction | WinAction
+export interface RollbackAction {
+  action: 'rollback'
+  actionId: string
+  originalActionId: string
+}
+
+/**
+ * A single action to apply, discriminated on `action`. For `bet`/`win` the
+ * direction (debit vs credit) is encoded by the variant, not by the sign of
+ * `amount` (always > 0); a `rollback` reverses the original it references.
+ */
+export type Action = BetAction | WinAction | RollbackAction
 
 /**
  * A batch of actions to apply for one user/currency, with the optional game

@@ -53,6 +53,11 @@ const createTransactions: Migration = {
       )
       .addColumn('amount', 'bigint', (col) => col.notNull())
       .addColumn('original_action_id', 'uuid')
+      // Denormalized flag: an original (bet/win) is set true once a rollback
+      // reverses it, so the future RTP query can filter
+      // `WHERE type <> 'rollback' AND rolledback = false` instead of an anti-join
+      // against the rollback rows at scale. Rollback rows keep it false.
+      .addColumn('rolledback', 'boolean', (col) => col.notNull().defaultTo(false))
       .addColumn('created_at', 'timestamptz', (col) => col.notNull().defaultTo(sql`now()`))
       .execute()
 

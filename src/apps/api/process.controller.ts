@@ -20,24 +20,40 @@ interface ProcessRequest {
  * Narrows one unvalidated array element to an {@link Action}. `bet` and `win`
  * share the same wire shape (string `action_id`, positive-integer `amount`);
  * they differ only by `action`, which the domain uses to pick debit vs credit.
- * `rollback` is a future slice and any other type is rejected as a bad request
- * (a 400 is safer than silently dropping or misapplying them). The narrowed
- * action's domain invariants are then enforced by the core `validateAction`.
+ * A `rollback` carries `original_action_id` (a string) and NO `amount` — the
+ * amount is derived from the referenced original. Any other type is rejected as
+ * a bad request (a 400 is safer than silently dropping or misapplying them).
+ * The narrowed action's domain invariants are then enforced by the core
+ * `validateAction`.
  */
 function parseAction(raw: unknown): Action {
   if (typeof raw !== 'object' || raw === null) {
     throw new BadRequestError('each action must be a JSON object')
   }
-  if (!('action' in raw) || (raw.action !== 'bet' && raw.action !== 'win')) {
-    throw new BadRequestError('unsupported action type; only "bet" and "win" are supported')
+  if (
+    !('action' in raw) ||
+    (raw.action !== 'bet' && raw.action !== 'win' && raw.action !== 'rollback')
+  ) {
+    throw new BadRequestError(
+      'unsupported action type; only "bet", "win" and "rollback" are supported',
+    )
   }
   if (!('action_id' in raw) || typeof raw.action_id !== 'string') {
     throw new BadRequestError('action_id is required and must be a string')
   }
-  if (!('amount' in raw) || typeof raw.amount !== 'number') {
-    throw new BadRequestError('amount is required and must be a number')
+
+  let action: Action
+  if (raw.action === 'rollback') {
+    if (!('original_action_id' in raw) || typeof raw.original_action_id !== 'string') {
+      throw new BadRequestError('original_action_id is required and must be a string')
+    }
+    action = { action: 'rollback', actionId: raw.action_id, originalActionId: raw.original_action_id }
+  } else {
+    if (!('amount' in raw) || typeof raw.amount !== 'number') {
+      throw new BadRequestError('amount is required and must be a number')
+    }
+    action = { action: raw.action, actionId: raw.action_id, amount: raw.amount }
   }
-  const action: Action = { action: raw.action, actionId: raw.action_id, amount: raw.amount }
   validateAction(action)
   return action
 }
