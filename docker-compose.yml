@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: yeet
     ports:
-      - '${DB_HOST_PORT:-5432}:5432'
+      - '${DB_HOST_PORT:-5132}:5432'
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U postgres -d yeet']
       interval: 5s

@@ -18,7 +18,7 @@ Deeper architecture notes live in [`AGENTS.md`](./AGENTS.md).
 
 ```sh
 cp .env.example .env                    # DATABASE_URL, PORT, HMAC_SECRET, DB_HOST_PORT
-docker compose up --build               # API on :3000, Postgres on :5432
+docker compose up --build               # API on :3000, Postgres on :5132
 ```
 
 Migrations run automatically on boot (advisory-locked, so replicas booting at
