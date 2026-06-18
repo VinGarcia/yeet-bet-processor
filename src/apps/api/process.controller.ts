@@ -47,7 +47,11 @@ function parseAction(raw: unknown): Action {
     if (!('original_action_id' in raw) || typeof raw.original_action_id !== 'string') {
       throw new BadRequestError('original_action_id is required and must be a string')
     }
-    action = { action: 'rollback', actionId: raw.action_id, originalActionId: raw.original_action_id }
+    action = {
+      action: 'rollback',
+      actionId: raw.action_id,
+      originalActionId: raw.original_action_id,
+    }
   } else {
     if (!('amount' in raw) || typeof raw.amount !== 'number') {
       throw new BadRequestError('amount is required and must be a number')
