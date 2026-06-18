@@ -232,6 +232,27 @@ describe('POST /reports/rtp/users (per-user RTP)', () => {
     expect(page2.items.map((i) => i.user_id)).toEqual(['p-user-3'])
     expect(page2.cursor).toBeNull()
   })
+
+  it('filters to a single user when user_id is given (without it, all users return)', async () => {
+    await seedTx([
+      { userId: 'user-1', currency: 'USD', type: 'bet', amount: 100, createdAt: MID },
+      { userId: 'user-1', currency: 'USD', type: 'win', amount: 90, createdAt: MID },
+      { userId: 'user-2', currency: 'USD', type: 'bet', amount: 500, createdAt: MID },
+    ])
+
+    const all = await postSignedTo(USERS_URL, JSON.stringify({ from: FROM, to: TO }))
+    const allBody = (await all.json()) as { items: UserItem[] }
+    expect(allBody.items.map((i) => i.user_id).sort()).toEqual(['user-1', 'user-2'])
+
+    const one = await postSignedTo(USERS_URL, JSON.stringify({ from: FROM, to: TO, user_id: 'user-1' }))
+    expect(one.status).toBe(200)
+    const oneBody = (await one.json()) as { items: UserItem[]; cursor: string | null }
+    expect(oneBody.items).toHaveLength(1)
+    expect(oneBody.items[0]!.user_id).toBe('user-1')
+    expect(oneBody.items[0]!.total_bet).toBe(100)
+    expect(oneBody.items[0]!.total_win).toBe(90)
+    expect(oneBody.cursor).toBeNull()
+  })
 })
 
 describe('POST /reports/rtp/casino (casino-wide RTP)', () => {
@@ -320,6 +341,11 @@ describe('POST /reports/rtp/* (auth & validation)', () => {
 
   it('rejects a non-string cursor with 400', async () => {
     const res = await postSignedTo(USERS_URL, JSON.stringify({ from: FROM, to: TO, cursor: 123 }))
+    expect(res.status).toBe(400)
+  })
+
+  it('rejects a non-string user_id with 400', async () => {
+    const res = await postSignedTo(USERS_URL, JSON.stringify({ from: FROM, to: TO, user_id: 123 }))
     expect(res.status).toBe(400)
   })
 })

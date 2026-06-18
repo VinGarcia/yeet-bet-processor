@@ -54,7 +54,8 @@ One business endpoint plus two reports, all `POST` and HMAC-signed; `/health` is
 
 - `POST /aggregator/takehome/process` — bets/wins/rollbacks (or balance-only when
   `actions` is empty). Returns `{ game_id, transactions: [{action_id, tx_id}], balance }`.
-- `POST /aggregator/takehome/reports/rtp/users` — RTP per (user, currency).
+- `POST /aggregator/takehome/reports/rtp/users` — RTP per (user, currency); pass an
+  optional `user_id` in the body to restrict it to a single user.
 - `POST /aggregator/takehome/reports/rtp/casino` — RTP per currency.
 - `GET /health` — liveness/readiness (`200` ok / `503` if DB down), unauthenticated.
 

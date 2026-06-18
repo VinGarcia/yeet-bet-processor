@@ -41,7 +41,16 @@ function parseRtpReportRequest(body: unknown): RtpReportQuery {
     limit = body.limit
   }
 
-  return { from, to, cursor, limit }
+  // Optional: restrict the per-user report to one user. The casino report ignores it.
+  let userId: string | undefined
+  if ('user_id' in body) {
+    if (typeof body.user_id !== 'string' || body.user_id === '') {
+      throw new BadRequestError('user_id must be a non-empty string')
+    }
+    userId = body.user_id
+  }
+
+  return { from, to, cursor, limit, userId }
 }
 
 function toCasinoWire(r: CasinoRtpRow): Record<string, unknown> {

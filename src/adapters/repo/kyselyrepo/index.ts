@@ -398,6 +398,7 @@ export class KyselyRepo implements Repo {
       after === undefined
         ? sql``
         : sql`AND (currency, user_id) > (${after.currency}, ${after.userId})`
+    const userFilter = query.userId === undefined ? sql`` : sql`AND user_id = ${query.userId}`
 
     const { rows } = await sql<UserRtpDbRow>`
       SELECT
@@ -406,6 +407,7 @@ export class KyselyRepo implements Repo {
         ${rtpAggregates}
       FROM transactions
       WHERE ${rtpWindow(query.from, query.to)}
+        ${userFilter}
         ${keyset}
       GROUP BY currency, user_id
       ORDER BY currency, user_id

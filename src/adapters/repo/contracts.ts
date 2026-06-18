@@ -10,6 +10,8 @@ export interface RtpReportQuery {
   to: Date
   cursor?: string
   limit?: number
+  /** Per-user report only: restrict to one user; ignored by the casino report. */
+  userId?: string
 }
 
 /** One page: `items` plus an opaque next-page `cursor`, or `null` when exhausted. */
@@ -39,7 +41,7 @@ export interface Repo {
   /**
    * Per-user RTP over `[from, to)`, grouped by (`userId`, `currency`). Reversed
    * rows are excluded from the totals and surfaced separately. Keyset cursor on
-   * (`currency`, `userId`).
+   * (`currency`, `userId`). An optional `query.userId` restricts it to one user.
    */
   userRtpReport(query: RtpReportQuery): Promise<RtpReportPage<UserRtpRow>>
 
