@@ -147,6 +147,43 @@ currency unit) and converted to a JS `number` at the adapter boundary (in
 `findWallet`). This is precision-safe below `2^53`; balances beyond that would
 lose precision — a documented limit for extreme values.
 
+## Seeding
+
+`pnpm seed` bulk-creates wallet rows so a fresh database has thousands of funded
+users to test or benchmark against. It connects with the same `DATABASE_URL` as
+the app, self-migrates, then inserts in chunks.
+
+```sh
+pnpm seed                                  # 1000 USD wallets, default balances
+pnpm seed --count=5000 --currency=EUR      # 5000 EUR wallets
+pnpm seed --balance=50000                  # fixed balance (minor units)
+pnpm seed --min=10000 --max=2000000        # deterministic balance range
+```
+
+**Direct wallet inserts, never `win` actions.** Seed money is bootstrap
+liquidity, not game winnings. Funding via a `win` would write it to the
+transaction ledger and inflate RTP (return-to-player) metrics, so the seeder
+writes `wallets` rows directly and bypasses the ledger entirely.
+
+**Deterministic + idempotent.** User ids are `<prefix><index>` and balances are
+derived from the row index via a fixed-seed PRNG (`mulberry32`), so repeated runs
+produce identical data. Inserts use `ON CONFLICT (user_id, currency) DO NOTHING`,
+so re-running never errors or duplicates — the row count and balances stay the
+same.
+
+**Config knobs** (CLI flag wins over env var wins over default):
+
+| Flag         | Env             | Default      | Meaning                                     |
+| ------------ | --------------- | ------------ | ------------------------------------------- |
+| `--count`    | `SEED_COUNT`    | `1000`       | Number of wallets to create                 |
+| `--currency` | `SEED_CURRENCY` | `USD`        | One of `USD`, `EUR`, `BRL`, `GBP`           |
+| `--balance`  | `SEED_BALANCE`  | —            | Fixed balance (sets both bounds)            |
+| `--min`      | `SEED_MIN`      | `10000`      | Balance range lower bound (minor units)     |
+| `--max`      | `SEED_MAX`      | `1000000`    | Balance range upper bound (minor units)     |
+| `--seed`     | `SEED_SEED`     | `1`          | PRNG seed for reproducible balances         |
+| `--prefix`   | `SEED_PREFIX`   | `seed-user-` | Generated user-id prefix                    |
+| `--chunk`    | `SEED_CHUNK`    | `1000`       | Rows per bulk INSERT (scales to far more)   |
+
 ## Health check
 
 `GET /health` is an **unauthenticated** endpoint. It is a load-balancer /

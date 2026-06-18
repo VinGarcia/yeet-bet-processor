@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "tsx watch src/apps/api/main.ts",
     "start": "node dist/apps/api/main.js",
+    "seed": "tsx src/apps/seed/main.ts",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
