@@ -1224,6 +1224,337 @@ describe('POST /aggregator/takehome/process (rollback)', () => {
     expect(await dbTxCount(user)).toBe(2)
   })
 
+  // P1 — cross-call double rollback after a pre-rollback/noop. Call 1 records a
+  // pre-rollback of A; call 2's bet A noops (no debit); call 3 is a SECOND,
+  // distinct rollback of the same A. Even though A was never applied (it was
+  // pre-rolled then noop'd), A already has a committed rollback, so the second
+  // rollback is a double rollback → 400. Balance never moved; only the first
+  // rollback row and the noop'd bet row persist.
+  it('rejects a second rollback of a pre-rolled, noop\'d original with 400 (double rollback)', async () => {
+    const user = '8|USDT|USD'
+    await setup({ wallets: [{ userId: user, currency: 'USD', balance: 1000 }] })
+
+    const betId = 'aa100000-1111-4111-8111-aa1000000001'
+    const rb1Id = 'aa100000-2222-4222-8222-aa1000000002'
+    const rb2Id = 'aa100000-3333-4333-8333-aa1000000003'
+
+    // Call 1: pre-rollback of A (A does not exist yet).
+    const rb1 = await postSigned(
+      JSON.stringify({
+        user_id: user,
+        currency: 'USD',
+        game: 'acceptance:test',
+        game_id: '1761032918000000001',
+        actions: [{ action: 'rollback', action_id: rb1Id, original_action_id: betId }],
+      }),
+    )
+    expect(rb1.status).toBe(200)
+    expect(await dbBalance(user, 'USD')).toBe(1000)
+
+    // Call 2: bet A arrives — noop'd by the pre-rollback, no debit.
+    const bet = await postSigned(
+      JSON.stringify({
+        user_id: user,
+        currency: 'USD',
+        game: 'acceptance:test',
+        game_id: '1761032918000000001',
+        actions: [{ action: 'bet', action_id: betId, amount: 100 }],
+      }),
+    )
+    expect(bet.status).toBe(200)
+    expect(((await bet.json()) as { balance: number }).balance).toBe(1000)
+    expect(await dbTxRolledback(betId)).toBe(true)
+
+    // Call 3: a second, distinct rollback of the already-rolled-back A → 400.
+    const rb2 = await postSigned(
+      JSON.stringify({
+        user_id: user,
+        currency: 'USD',
+        game: 'acceptance:test',
+        game_id: '1761032918000000001',
+        actions: [{ action: 'rollback', action_id: rb2Id, original_action_id: betId }],
+      }),
+    )
+    expect(rb2.status).toBe(400)
+
+    // Unchanged: balance still 1000, only the pre-rollback and the noop'd bet
+    // persisted (the rejected second rollback wrote nothing).
+    expect(await dbBalance(user, 'USD')).toBe(1000)
+    expect(await dbTxCount(user)).toBe(2)
+    expect(await dbTxRow(rb2Id)).toBeUndefined()
+  })
+
+  // P2 — a pre-rolled WIN starves later funds in the same batch. Call 1 records a
+  // pre-rollback of win W. In call 2 the balance is only 50; the batch is
+  // [win W, bet 120]. W is noop'd by the pre-rollback so it credits NOTHING, so
+  // the bet overdraws (50 - 120 < 0) → code 100, and the WHOLE batch rolls back.
+  // (Were W credited, 50 + 200 - 120 = 130 would be fine — proving the win was
+  // genuinely noop'd, not applied.)
+  it('rolls back the batch with code 100 when a pre-rolled win starves a later bet', async () => {
+    const user = '8|USDT|USD'
+    await setup({ wallets: [{ userId: user, currency: 'USD', balance: 50 }] })
+
+    const winId = 'bb100000-1111-4111-8111-bb1000000001'
+    const rbId = 'bb100000-2222-4222-8222-bb1000000002'
+    const betId = 'bb100000-3333-4333-8333-bb1000000003'
+
+    // Call 1: pre-rollback of the win.
+    const rb = await postSigned(
+      JSON.stringify({
+        user_id: user,
+        currency: 'USD',
+        game: 'acceptance:test',
+        game_id: '1761032918000000002',
+        actions: [{ action: 'rollback', action_id: rbId, original_action_id: winId }],
+      }),
+    )
+    expect(rb.status).toBe(200)
+    expect(await dbBalance(user, 'USD')).toBe(50)
+
+    // Call 2: the win noops (no credit), so the bet overdraws → code 100.
+    const res = await postSigned(
+      JSON.stringify({
+        user_id: user,
+        currency: 'USD',
+        game: 'acceptance:test',
+        game_id: '1761032918000000002',
+        actions: [
+          { action: 'win', action_id: winId, amount: 200 },
+          { action: 'bet', action_id: betId, amount: 120 },
+        ],
+      }),
+    )
+    expect(res.status).toBeGreaterThanOrEqual(400)
+    expect(res.status).toBeLessThan(500)
+    expect(((await res.json()) as { code: number }).code).toBe(100)
+
+    // Whole batch rolled back: balance untouched, neither the win nor the bet
+    // row persisted — only the pre-rollback from call 1 remains.
+    expect(await dbBalance(user, 'USD')).toBe(50)
+    expect(await dbTxCount(user)).toBe(1)
+    expect(await dbTxRow(winId)).toBeUndefined()
+    expect(await dbTxRow(betId)).toBeUndefined()
+  })
+
+  // P3 — an idempotent rollback replay mixed with a fresh bet in one batch. Call
+  // 1 commits bet A and rolls it back (balance restored). Call 2 re-sends that
+  // rollback PLUS a fresh bet: the replayed rollback is skipped (no second
+  // reverse, original tx_id returned), and the fresh bet applies exactly once.
+  it('replays a rollback and applies a fresh bet in the same batch', async () => {
+    const user = '8|USDT|USD'
+    await setup({ wallets: [{ userId: user, currency: 'USD', balance: 1000 }] })
+
+    const betA = 'cc100000-1111-4111-8111-cc1000000001'
+    const rbId = 'cc100000-2222-4222-8222-cc1000000002'
+    const betB = 'cc100000-3333-4333-8333-cc1000000003'
+
+    // Call 1: bet A then its rollback — balance back to 1000.
+    await postSigned(
+      JSON.stringify({
+        user_id: user,
+        currency: 'USD',
+        game: 'acceptance:test',
+        game_id: '1761032918000000003',
+        actions: [{ action: 'bet', action_id: betA, amount: 100 }],
+      }),
+    )
+    const rb1 = await postSigned(
+      JSON.stringify({
+        user_id: user,
+        currency: 'USD',
+        game: 'acceptance:test',
+        game_id: '1761032918000000003',
+        actions: [{ action: 'rollback', action_id: rbId, original_action_id: betA }],
+      }),
+    )
+    expect(rb1.status).toBe(200)
+    const originalRbTxId = ((await rb1.json()) as { transactions: { tx_id: string }[] })
+      .transactions[0]!.tx_id
+    expect(await dbBalance(user, 'USD')).toBe(1000)
+
+    // Call 2: replay the rollback + a fresh bet B (30).
+    const res = await postSigned(
+      JSON.stringify({
+        user_id: user,
+        currency: 'USD',
+        game: 'acceptance:test',
+        game_id: '1761032918000000003',
+        actions: [
+          { action: 'rollback', action_id: rbId, original_action_id: betA },
+          { action: 'bet', action_id: betB, amount: 30 },
+        ],
+      }),
+    )
+    expect(res.status).toBe(200)
+    const payload = (await res.json()) as {
+      balance: number
+      transactions: { action_id: string; tx_id: string }[]
+    }
+    // The replayed rollback keeps its original tx_id (no second reverse); only the
+    // fresh bet moved the balance: 1000 - 30.
+    expect(payload.balance).toBe(970)
+    expect(payload.transactions.map((t) => t.action_id)).toEqual([rbId, betB])
+    expect(payload.transactions[0]!.tx_id).toBe(originalRbTxId)
+    expect(payload.transactions[1]!.tx_id).toMatch(UUID_RE)
+
+    // Persisted: bet A + rollback + fresh bet B = 3 rows; the fresh bet applied once.
+    expect(await dbBalance(user, 'USD')).toBe(970)
+    expect(await dbTxCount(user)).toBe(3)
+    expect(await dbTxRow(betB)).toEqual({ type: 'bet', amount: 30, originalActionId: null })
+  })
+
+  // P4 — a noop'd original and an INDEPENDENT fresh bet in the same batch. Call 1
+  // pre-rolls A. Call 2 is [bet A, bet B]: A is noop'd by the pre-rollback (no
+  // debit), but the unrelated bet B still applies exactly once.
+  it('noops a pre-rolled original yet applies an independent fresh bet in the same batch', async () => {
+    const user = '8|USDT|USD'
+    await setup({ wallets: [{ userId: user, currency: 'USD', balance: 1000 }] })
+
+    const betA = 'dd100000-1111-4111-8111-dd1000000001'
+    const rbId = 'dd100000-2222-4222-8222-dd1000000002'
+    const betB = 'dd100000-3333-4333-8333-dd1000000003'
+
+    // Call 1: pre-rollback of A.
+    await postSigned(
+      JSON.stringify({
+        user_id: user,
+        currency: 'USD',
+        game: 'acceptance:test',
+        game_id: '1761032918000000004',
+        actions: [{ action: 'rollback', action_id: rbId, original_action_id: betA }],
+      }),
+    )
+
+    // Call 2: A noops, B (a distinct, un-rolled-back bet) applies.
+    const res = await postSigned(
+      JSON.stringify({
+        user_id: user,
+        currency: 'USD',
+        game: 'acceptance:test',
+        game_id: '1761032918000000004',
+        actions: [
+          { action: 'bet', action_id: betA, amount: 100 },
+          { action: 'bet', action_id: betB, amount: 40 },
+        ],
+      }),
+    )
+    expect(res.status).toBe(200)
+    const payload = (await res.json()) as {
+      balance: number
+      transactions: { action_id: string; tx_id: string }[]
+    }
+    // Only B debited: 1000 - 40.
+    expect(payload.balance).toBe(960)
+    expect(payload.transactions.map((t) => t.action_id)).toEqual([betA, betB])
+
+    // Persisted: A noop'd (rolledback=true), B applied once (rolledback=false).
+    expect(await dbBalance(user, 'USD')).toBe(960)
+    expect(await dbTxCount(user)).toBe(3) // rollback + bet A (noop) + bet B
+    expect(await dbTxRolledback(betA)).toBe(true)
+    expect(await dbTxRolledback(betB)).toBe(false)
+    expect(await dbTxRow(betB)).toEqual({ type: 'bet', amount: 40, originalActionId: null })
+  })
+
+  // P5 — one batch that is BOTH a rollback-of-a-rollback AND a double rollback:
+  // [rollback R1→A, rollback R2→A, rollback R3→R1]. R2 targets the same original
+  // A as R1 (double rollback) and R3 targets a rollback action (rollback-of-a-
+  // rollback). Either alone is a 400; together the whole batch is rejected and
+  // nothing persists.
+  it('rejects a batch that is both a double rollback and a rollback-of-a-rollback with 400', async () => {
+    const user = '8|USDT|USD'
+    await setup({ wallets: [{ userId: user, currency: 'USD', balance: 1000 }] })
+
+    const aId = 'ee100000-1111-4111-8111-ee1000000001'
+    const r1Id = 'ee100000-2222-4222-8222-ee1000000002'
+    const r2Id = 'ee100000-3333-4333-8333-ee1000000003'
+    const r3Id = 'ee100000-4444-4444-8444-ee1000000004'
+
+    const res = await postSigned(
+      JSON.stringify({
+        user_id: user,
+        currency: 'USD',
+        game: 'acceptance:test',
+        game_id: '1761032918000000005',
+        actions: [
+          { action: 'rollback', action_id: r1Id, original_action_id: aId },
+          { action: 'rollback', action_id: r2Id, original_action_id: aId },
+          { action: 'rollback', action_id: r3Id, original_action_id: r1Id },
+        ],
+      }),
+    )
+    expect(res.status).toBe(400)
+
+    // Whole batch rejected: nothing persisted, balance untouched.
+    expect(await dbBalance(user, 'USD')).toBe(1000)
+    expect(await dbTxCount(user)).toBe(0)
+  })
+
+  // P6 — replaying an APPLIED-then-ROLLED-BACK bet is an idempotent REPLAY, not a
+  // noop. Call 1 commits bet A (debits). Call 2 rolls A back (credits). Call 3
+  // re-sends bet A: because A already has a committed ledger row, it is a replay —
+  // it returns A's ORIGINAL tx_id and does NOT touch the balance again. (A noop
+  // would mint a fresh tx_id for A; a replay reuses the original one.)
+  it('replays an applied-then-rolled-back bet idempotently (original tx_id, no balance change)', async () => {
+    const user = '8|USDT|USD'
+    await setup({ wallets: [{ userId: user, currency: 'USD', balance: 1000 }] })
+
+    const betA = 'ff100000-1111-4111-8111-ff1000000001'
+    const rbId = 'ff100000-2222-4222-8222-ff1000000002'
+
+    // Call 1: bet A debits 100 → 900, capture its tx_id.
+    const bet = await postSigned(
+      JSON.stringify({
+        user_id: user,
+        currency: 'USD',
+        game: 'acceptance:test',
+        game_id: '1761032918000000006',
+        actions: [{ action: 'bet', action_id: betA, amount: 100 }],
+      }),
+    )
+    expect(bet.status).toBe(200)
+    const originalBetTxId = ((await bet.json()) as { transactions: { tx_id: string }[] })
+      .transactions[0]!.tx_id
+    expect(await dbBalance(user, 'USD')).toBe(900)
+
+    // Call 2: rollback A credits 100 back → 1000.
+    const rb = await postSigned(
+      JSON.stringify({
+        user_id: user,
+        currency: 'USD',
+        game: 'acceptance:test',
+        game_id: '1761032918000000006',
+        actions: [{ action: 'rollback', action_id: rbId, original_action_id: betA }],
+      }),
+    )
+    expect(rb.status).toBe(200)
+    expect(await dbBalance(user, 'USD')).toBe(1000)
+
+    // Call 3: re-send bet A — idempotent replay, original tx_id, no balance change.
+    const replay = await postSigned(
+      JSON.stringify({
+        user_id: user,
+        currency: 'USD',
+        game: 'acceptance:test',
+        game_id: '1761032918000000006',
+        actions: [{ action: 'bet', action_id: betA, amount: 100 }],
+      }),
+    )
+    expect(replay.status).toBe(200)
+    const payload = (await replay.json()) as {
+      balance: number
+      transactions: { action_id: string; tx_id: string }[]
+    }
+    expect(payload.balance).toBe(1000)
+    expect(payload.transactions[0]!.action_id).toBe(betA)
+    // Replay reuses the ORIGINAL bet tx_id (a noop would mint a fresh one).
+    expect(payload.transactions[0]!.tx_id).toBe(originalBetTxId)
+
+    // Persisted: no new row, balance still 1000; A's row keeps its committed shape.
+    expect(await dbBalance(user, 'USD')).toBe(1000)
+    expect(await dbTxCount(user)).toBe(2) // bet A + rollback
+    expect(await dbTxRow(betA)).toEqual({ type: 'bet', amount: 100, originalActionId: null })
+  })
+
   // Controller: a rollback missing `original_action_id` is a bad request (400).
   it('rejects a rollback with no original_action_id with 400', async () => {
     const user = '8|USDT|USD'
