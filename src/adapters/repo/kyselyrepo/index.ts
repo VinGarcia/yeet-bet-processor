@@ -1,10 +1,118 @@
 import { randomUUID } from 'node:crypto'
 import { sql, type Kysely, type Selectable } from 'kysely'
-import type { Repo } from '../contracts.js'
-import type { UserActions, Wallet } from '../../../core/entities.js'
+import {
+  RTP_DEFAULT_LIMIT,
+  RTP_MAX_LIMIT,
+  type Repo,
+  type RtpReportPage,
+  type RtpReportQuery,
+} from '../contracts.js'
+import type { CasinoRtpRow, UserActions, UserRtpRow, Wallet } from '../../../core/entities.js'
 import { validateAction } from '../../../core/validators.js'
 import { BadRequestError, InsufficientFundsError } from '../../../core/errors.js'
 import type { DB, TransactionsTable } from './schema.js'
+
+/**
+ * The raw aggregate row a casino-wide RTP query returns. `count`/`sum` come back
+ * from the driver as strings (Postgres `bigint`/`numeric`), converted to numbers
+ * at the boundary — exact below 2^53, consistent with the rest of the repo.
+ */
+interface CasinoRtpDbRow {
+  currency: string
+  rounds: string
+  total_bet: string
+  total_win: string
+  rolled_back_bet: string
+  rolled_back_win: string
+}
+/** A per-user aggregate row: a {@link CasinoRtpDbRow} plus its `user_id`. */
+interface UserRtpDbRow extends CasinoRtpDbRow {
+  user_id: string
+}
+
+/** Clamps a caller-supplied page size to [1, RTP_MAX_LIMIT], defaulting it. */
+function pageLimit(limit: number | undefined): number {
+  if (limit === undefined) return RTP_DEFAULT_LIMIT
+  return Math.min(Math.max(limit, 1), RTP_MAX_LIMIT)
+}
+
+/**
+ * Encodes the keyset (the last row's ordering columns) into an opaque base64url
+ * cursor. The client echoes it back verbatim to fetch the next page; it never
+ * needs to understand the shape, so we are free to change it later.
+ */
+function encodeCursor(keyset: Record<string, string>): string {
+  return Buffer.from(JSON.stringify(keyset)).toString('base64url')
+}
+
+/** Decodes a casino cursor (`{ currency }`); a malformed token is a 400. */
+function decodeCasinoCursor(cursor: string): { currency: string } {
+  const obj = decodeCursor(cursor)
+  if (typeof obj.currency === 'string') return { currency: obj.currency }
+  throw new BadRequestError('invalid cursor')
+}
+
+/** Decodes a per-user cursor (`{ currency, userId }`); malformed → 400. */
+function decodeUserCursor(cursor: string): { currency: string; userId: string } {
+  const obj = decodeCursor(cursor)
+  if (typeof obj.currency === 'string' && typeof obj.userId === 'string') {
+    return { currency: obj.currency, userId: obj.userId }
+  }
+  throw new BadRequestError('invalid cursor')
+}
+
+/** Parses a base64url cursor into a string→string map; malformed → 400. */
+function decodeCursor(cursor: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'))
+    if (typeof parsed === 'object' && parsed !== null) return parsed as Record<string, unknown>
+  } catch {
+    /* fall through to the shared error below */
+  }
+  throw new BadRequestError('invalid cursor')
+}
+
+/**
+ * Maps a casino aggregate row to the domain entity, computing `rtp` here in app
+ * code (not SQL): `totalWin / totalBet`, or `null` when there are no non-reversed
+ * bets (an undefined ratio rather than a divide-by-zero).
+ */
+/**
+ * The five RTP aggregate expressions shared by the per-user and casino-wide
+ * reports. `rounds`/`total_bet`/`total_win` sum the live (non-reversed) rows;
+ * `rolled_back_bet`/`rolled_back_win` surface the reversed amounts separately.
+ * Identical in both reports, which differ only in their GROUP BY and keyset.
+ */
+const rtpAggregates = sql`
+  count(*) FILTER (WHERE type = 'bet' AND NOT rolledback) AS rounds,
+  coalesce(sum(amount) FILTER (WHERE type = 'bet' AND NOT rolledback), 0) AS total_bet,
+  coalesce(sum(amount) FILTER (WHERE type = 'win' AND NOT rolledback), 0) AS total_win,
+  coalesce(sum(amount) FILTER (WHERE type = 'bet' AND rolledback), 0) AS rolled_back_bet,
+  coalesce(sum(amount) FILTER (WHERE type = 'win' AND rolledback), 0) AS rolled_back_win`
+
+/**
+ * The shared window predicate for both reports: a half-open `[from, to)` range
+ * on `created_at` plus the `type IN ('bet', 'win')` filter. Half-open so two
+ * adjacent windows (`…to = T` then `from = T…`) never double-count a row stamped
+ * exactly at `T`. Each report appends its own keyset predicate after this.
+ */
+function rtpWindow(from: Date, to: Date) {
+  return sql`created_at >= ${from} AND created_at < ${to} AND type IN ('bet', 'win')`
+}
+
+function mapCasinoRow(r: CasinoRtpDbRow): CasinoRtpRow {
+  const totalBet = Number(r.total_bet)
+  const totalWin = Number(r.total_win)
+  return {
+    currency: r.currency,
+    rounds: Number(r.rounds),
+    totalBet,
+    totalWin,
+    rtp: totalBet === 0 ? null : totalWin / totalBet,
+    rolledBackBet: Number(r.rolled_back_bet),
+    rolledBackWin: Number(r.rolled_back_win),
+  }
+}
 
 /**
  * A `transactions` row in the camelCase domain shape, with `amount` as a JS
@@ -357,5 +465,76 @@ export class KyselyRepo implements Repo {
 
       return { balance, transactions }
     })
+  }
+
+  /**
+   * Per-user RTP report. ONE windowed scan over `transactions` computes both the
+   * non-reversed sums and the reversed sums in a single pass using FILTER
+   * aggregates, so there is no second query or anti-join. The window predicate
+   * (half-open `created_at` in `[from, to)`, `type IN ('bet','win')`) is applied
+   * to the raw rows before grouping; the keyset predicate compares the group
+   * key, so it can be
+   * a plain row-value comparison on those same raw columns. We fetch `limit + 1`
+   * rows to detect whether a further page exists.
+   */
+  async userRtpReport(query: RtpReportQuery): Promise<RtpReportPage<UserRtpRow>> {
+    const limit = pageLimit(query.limit)
+    const after = query.cursor === undefined ? undefined : decodeUserCursor(query.cursor)
+    const keyset =
+      after === undefined
+        ? sql``
+        : sql`AND (currency, user_id) > (${after.currency}, ${after.userId})`
+
+    const { rows } = await sql<UserRtpDbRow>`
+      SELECT
+        user_id,
+        currency,
+        ${rtpAggregates}
+      FROM transactions
+      WHERE ${rtpWindow(query.from, query.to)}
+        ${keyset}
+      GROUP BY currency, user_id
+      ORDER BY currency, user_id
+      LIMIT ${limit + 1}
+    `.execute(this.db)
+
+    const hasMore = rows.length > limit
+    const page = hasMore ? rows.slice(0, limit) : rows
+    const last = page[page.length - 1]
+    const cursor =
+      hasMore && last !== undefined ? encodeCursor({ currency: last.currency, userId: last.user_id }) : null
+
+    return { items: page.map((r) => ({ ...mapCasinoRow(r), userId: r.user_id })), cursor }
+  }
+
+  /**
+   * Casino-wide RTP report: identical to {@link KyselyRepo.userRtpReport} but
+   * grouped by `currency` only (RTP across different currencies cannot be summed
+   * into one number) and keyset-paginated on `currency`.
+   */
+  async casinoRtpReport(query: RtpReportQuery): Promise<RtpReportPage<CasinoRtpRow>> {
+    const limit = pageLimit(query.limit)
+    const after = query.cursor === undefined ? undefined : decodeCasinoCursor(query.cursor)
+    const keyset = after === undefined ? sql`` : sql`AND currency > ${after.currency}`
+
+    const { rows } = await sql<CasinoRtpDbRow>`
+      SELECT
+        currency,
+        ${rtpAggregates}
+      FROM transactions
+      WHERE ${rtpWindow(query.from, query.to)}
+        ${keyset}
+      GROUP BY currency
+      ORDER BY currency
+      LIMIT ${limit + 1}
+    `.execute(this.db)
+
+    const hasMore = rows.length > limit
+    const page = hasMore ? rows.slice(0, limit) : rows
+    const last = page[page.length - 1]
+    const cursor =
+      hasMore && last !== undefined ? encodeCursor({ currency: last.currency }) : null
+
+    return { items: page.map(mapCasinoRow), cursor }
   }
 }

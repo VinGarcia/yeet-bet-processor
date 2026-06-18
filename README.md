@@ -181,3 +181,87 @@ Notes:
   domain code `100` (insufficient funds); HTTP-level errors currently reuse the
   HTTP status as `code` (e.g. `403`). The full error-code vocabulary still needs
   alignment with Yeet.
+
+## RTP reporting
+
+Two HMAC-signed endpoints compute Return-To-Player over a time window. Both are
+`POST` with a JSON body, signed with the **same** HMAC scheme as `/process`
+(missing/invalid signature → `403`):
+
+- `POST /aggregator/takehome/reports/rtp/users` — grouped per (`user_id`,
+  `currency`).
+- `POST /aggregator/takehome/reports/rtp/casino` — grouped per `currency` only.
+  Different currencies cannot be summed into a single RTP, so the casino-wide
+  report stays per-currency (it just drops `user_id`).
+
+**Request** — `{ from, to, cursor?, limit? }`. `from`/`to` are ISO-8601
+datetimes (`400` if malformed or `from > to`) bounding a **half-open** window
+`[from, to)` on `created_at` (`from` inclusive, `to` exclusive). `cursor` is the
+opaque next-page token from a prior response. `limit` is an optional positive
+integer page size, defaulting to `100` and capped at `1000`.
+
+**Response** — `{ items, cursor }`. A per-user item:
+
+```json
+{
+  "user_id": "string",
+  "currency": "USD",
+  "rounds": 123456,
+  "total_bet": 123456789,
+  "total_win": 117283950,
+  "rtp": 0.9498,
+  "rolled_back_bet": 1000,
+  "rolled_back_win": 500
+}
+```
+
+The casino item is identical without `user_id`. `cursor` is the token for the
+next page, or `null` once the result set is exhausted.
+
+Decisions:
+
+- **RTP = `total_win / total_bet`, both excluding reversed rows.** A row reversed
+  by a rollback (its denormalized `rolledback` flag is `true`) is excluded from
+  `total_bet`/`total_win` and from `rounds`. A row counts as reversed by its
+  **current** `rolledback` state, regardless of when the rollback happened
+  relative to the window. `rollback` rows themselves are never counted (the query
+  filters `type IN ('bet', 'win')`).
+- **Reversed amounts surfaced separately.** `rolled_back_bet` / `rolled_back_win`
+  are the sums of `amount` on reversed `bet` / `win` rows — so a reader can see
+  what was clawed back without it distorting the headline RTP.
+- **`rounds` = count of non-reversed `bet` rows** in the window (one bet = one
+  round). *Alternative considered:* counting **distinct `game_id`** as rounds. We
+  chose one-bet-per-round deliberately: it is unambiguous, needs no extra index,
+  and matches "RTP per wager". If a round is later defined as a full game
+  regardless of re-bets, switch to `count(distinct game_id)`.
+- **Denominator 0 → `rtp: null`.** When there are no non-reversed bets in the
+  window (`total_bet = 0`), the ratio is undefined, reported as `null` rather
+  than `0` or an error. The group still appears (e.g. wins-only) with its totals.
+- **Half-open `[from, to)` window.** `from` is inclusive, `to` is exclusive. This
+  lets a caller partition a timeline into adjacent windows (`…to = T` then
+  `from = T…`) with no overlap and no gap: a row stamped exactly at `T` is counted
+  by exactly one of them. An inclusive-both-ends window would double-count it.
+- **Keyset (cursor) pagination, not offset/limit.** Offset scans and discards the
+  skipped rows, degrading as you page deeper across billions of rows. We order by
+  the group key — (`currency`, `user_id`) per-user, `currency` casino-wide — and
+  the cursor encodes the last row's key; the next page adds a row-value predicate
+  (`(currency, user_id) > (…)`). Note this trims only the *emitted* result rows on
+  later pages — it is **not** a fresh indexed seek into the raw table. The query
+  groups and aggregates over the whole in-window row set every page (the only
+  index is on `created_at`, not the group key), then the keyset predicate filters
+  the grouped output. So a page is O(in-window rows), not O(page); the keyset
+  buys stable, gap-free paging, not a cheaper scan. The cursor is an opaque
+  base64url token (the client echoes it back verbatim); its shape is an
+  implementation detail we are free to change.
+- **Single windowed scan with FILTER aggregates.** Both the non-reversed sums and
+  the reversed sums come from one pass over the window (`count(*)`/`sum(amount)
+  FILTER (WHERE …)`), so there is no second query and no rollback anti-join.
+- **Supporting index.** Migration `003` adds a partial index
+  `transactions (created_at) WHERE type IN ('bet', 'win')` to make the window
+  scan selective without indexing the `rollback` rows the report never reads.
+
+**Limitation:** a per-user aggregate over a very large window inherently scans
+every matching row in that window — the index bounds the range but does not make
+an enormous span cheap. A production system would maintain a rollup /
+materialized per-period summary and read the report from that. That is out of
+scope for this take-home and accepted as a known limitation.

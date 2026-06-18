@@ -11,6 +11,7 @@ import {
 } from '../../core/errors.js'
 import { registerHealthController } from './health.controller.js'
 import { registerProcessController } from './process.controller.js'
+import { registerReportControllers } from './reports.controller.js'
 import { registerHmacAuth } from './middlewares/hmac-auth.js'
 
 declare module 'fastify' {
@@ -63,6 +64,7 @@ export async function buildApp({
   await app.register((protectedScope, _opts, done) => {
     registerHmacAuth(protectedScope, { secret: hmacSecret })
     registerProcessController(protectedScope, repo)
+    registerReportControllers(protectedScope, repo)
     done()
   })
 

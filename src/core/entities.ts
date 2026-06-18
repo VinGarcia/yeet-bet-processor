@@ -64,3 +64,32 @@ export interface UserActions {
   gameId?: string
   actions: Action[]
 }
+
+/**
+ * One row of a casino-wide RTP report, aggregated per `currency` over a time
+ * window. RTP and the totals deliberately EXCLUDE reversed rows (those whose
+ * `rolledback` flag is true); the reversed amounts are surfaced separately in
+ * `rolledBackBet`/`rolledBackWin` so a reader can see what was clawed back
+ * without it polluting the headline RTP.
+ *
+ * `rounds` is the count of non-reversed `bet` rows in the window (one bet = one
+ * round). `rtp` is `totalWin / totalBet`, or `null` when `totalBet` is 0 (no
+ * non-reversed bets — an undefined ratio). All amounts are integer minor units.
+ */
+export interface CasinoRtpRow {
+  currency: string
+  rounds: number
+  totalBet: number
+  totalWin: number
+  rtp: number | null
+  rolledBackBet: number
+  rolledBackWin: number
+}
+
+/**
+ * One row of a per-user RTP report: a {@link CasinoRtpRow} additionally grouped
+ * by `userId`, so the aggregate is per (`userId`, `currency`).
+ */
+export interface UserRtpRow extends CasinoRtpRow {
+  userId: string
+}

@@ -74,12 +74,36 @@ const createTransactions: Migration = {
 }
 
 /**
+ * Adds a partial index supporting the RTP report's windowed aggregate. The RTP
+ * query scans `transactions` by a `created_at` window filtered to
+ * `type IN ('bet', 'win')`; this index makes that range scan selective without
+ * indexing the `rollback` rows (which the report never reads). It does NOT make
+ * a huge-window per-user aggregate cheap — that inherently scans every matching
+ * row in the window. A production system would maintain a rollup / materialized
+ * per-period summary instead; that is a documented, accepted limitation here.
+ */
+const createRtpIndex: Migration = {
+  async up(db: Kysely<DB>): Promise<void> {
+    await sql`
+      CREATE INDEX transactions_rtp_window_idx
+        ON transactions (created_at)
+        WHERE type IN ('bet', 'win')
+    `.execute(db)
+  },
+
+  async down(db: Kysely<DB>): Promise<void> {
+    await sql`DROP INDEX transactions_rtp_window_idx`.execute(db)
+  },
+}
+
+/**
  * All migrations, keyed by name. Keys are lexicographically ordered so the
  * Migrator applies them in sequence. Add new migrations with the next prefix.
  */
 export const migrations: Record<string, Migration> = {
   '001_create_wallets': createWallets,
   '002_create_transactions': createTransactions,
+  '003_create_rtp_index': createRtpIndex,
 }
 
 // In-code provider: returns the `migrations` object directly. Avoids
