@@ -12,19 +12,13 @@ declare module 'fastify' {
 const AUTH_PREFIX = 'HMAC-SHA256 '
 
 /**
- * Registers HMAC-SHA256 authentication on the given (encapsulated) Fastify
- * scope. Every request handled by this scope must carry an
- * `Authorization: HMAC-SHA256 <hex>` header whose signature matches an
- * HMAC-SHA256 over the RAW request body bytes.
- *
- * Apply this to a protected sub-scope only; the body parser it installs
- * preserves raw bytes and would otherwise leak onto sibling routes.
+ * HMAC-SHA256 auth on an encapsulated scope: requests must carry
+ * `Authorization: HMAC-SHA256 <hex>` over the RAW body bytes. Scope-local only —
+ * the raw-body parser it installs would otherwise leak onto sibling routes.
  */
 export function registerHmacAuth(scope: FastifyInstance, opts: { secret: string }): void {
-  // Reject unauthenticated/malformed requests before the body parser runs, so a
-  // missing or garbage Authorization header never reaches JSON parsing.
-  // Rejections go to `done(err)` so they reach the central setErrorHandler;
-  // a synchronous `throw` in a callback hook would surface as an unmapped 500.
+  // Reject before the body parser runs. Rejections go via done(err) to reach the
+  // central setErrorHandler; a synchronous throw here would surface as a 500.
   scope.addHook('onRequest', (request, _reply, done) => {
     const header = request.headers.authorization
     if (header === undefined || !header.startsWith(AUTH_PREFIX)) {
@@ -36,9 +30,8 @@ export function registerHmacAuth(scope: FastifyInstance, opts: { secret: string 
     done()
   })
 
-  // Preserve the raw bytes so the signature is verified against exactly what
-  // the client sent, not a re-serialized JSON representation. The signature is
-  // verified BEFORE JSON.parse so a bad signature can never reach the parser.
+  // Verify against the raw bytes BEFORE JSON.parse, so a bad signature never
+  // reaches the parser and a re-serialization can't change what was signed.
   scope.addContentTypeParser(
     'application/json',
     { parseAs: 'buffer' },

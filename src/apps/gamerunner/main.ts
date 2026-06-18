@@ -8,10 +8,9 @@ import { mulberry32 } from './rng.js'
 import { runSimulation, type RunOptions } from './runner.js'
 import { TARGET_RTP } from './simulation.js'
 
-loadEnv({ path: 'config.env' })
+loadEnv()
 
 interface ResolvedConfig extends RunOptions {
-  /** The validated currency, kept narrow so the seeder accepts it directly. */
   currency: SupportedCurrency
   seed: number
   balance: number
@@ -43,8 +42,7 @@ function resolveConfig(argv: string[]): ResolvedConfig {
     userPrefix: pick(flags, 'prefix', 'GR_PREFIX') ?? 'gr-user-',
     tolerance: toFloat(pick(flags, 'tolerance', 'GR_TOLERANCE'), 0.01, 'tolerance'),
     seed: toInt(pick(flags, 'seed', 'GR_SEED'), 1, 'seed'),
-    // A balance large enough that an unlucky early streak cannot bankrupt a user
-    // before the run completes; sized off the worst-case bet and round count.
+    // 0 = derive a safe default below (see balance sizing in main).
     balance: toInt(pick(flags, 'balance', 'GR_BALANCE'), 0, 'balance'),
     baseURL: pick(flags, 'url', 'GR_BASE_URL') ?? `http://127.0.0.1:${process.env.PORT ?? '3000'}`,
     hmacSecret: required('HMAC_SECRET'),
@@ -54,8 +52,8 @@ function resolveConfig(argv: string[]): ResolvedConfig {
 async function main(): Promise<void> {
   const cfg = resolveConfig(process.argv.slice(2))
 
-  // Default starting balance: cover every round at the max bet plus headroom, so
-  // a cold streak never trips the non-negative-balance guard mid-run.
+  // Default balance covers every round at max bet ×3 headroom, so a cold streak
+  // never trips the funds guard mid-run.
   const balance = cfg.balance > 0 ? cfg.balance : cfg.roundsPerUser * cfg.betRange.max * 3
 
   const db = createDb(required('DATABASE_URL'))

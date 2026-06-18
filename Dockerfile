@@ -7,7 +7,10 @@ WORKDIR /app
 RUN corepack enable
 
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+# pnpm 11 exits non-zero when a devDep (esbuild/ssh2/...) has an unapproved
+# build script; allow them here since this build stage is thrown away and the
+# runtime --prod install pulls none of those packages.
+RUN pnpm install --frozen-lockfile --config.dangerouslyAllowAllBuilds
 
 COPY tsconfig.json ./
 COPY src ./src

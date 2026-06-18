@@ -1,11 +1,7 @@
 /**
- * Base domain error classes. Each carries a machine-readable numeric `code`
- * and a human-readable `message`. The core deliberately knows nothing about
- * HTTP: mapping a domain error to a transport status lives in the adapter
- * (the `setErrorHandler` in `apps/api/app.ts`).
- *
- * The numeric codes below are placeholder domain codes (documented in the
- * README as needing alignment with Yeet) and must NOT be read as HTTP status.
+ * Base domain error: a numeric domain `code` + message. The core knows nothing
+ * about HTTP — status mapping lives in `apps/api/app.ts`'s setErrorHandler. The
+ * codes are domain codes, NOT HTTP status (placeholders pending Yeet alignment).
  */
 export class DomainError extends Error {
   readonly code: number
@@ -41,11 +37,7 @@ export class InternalError extends DomainError {
   }
 }
 
-/**
- * Raised when a player's wallet cannot cover the net debit of a batch. Carries
- * the spec's domain code `100`. The whole request is rolled back: no wallet
- * change and no ledger rows are written.
- */
+// Wallet can't cover the batch's net debit; carries the spec's domain code 100.
 export class InsufficientFundsError extends DomainError {
   constructor(message = 'Player has not enough funds to process an action') {
     super(message, 100)

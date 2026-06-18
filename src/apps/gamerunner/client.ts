@@ -1,10 +1,7 @@
 import { signedJsonRequest } from '../../helpers/crypto/hmac.js'
 
-/**
- * A thin signed HTTP client for the take-home endpoints. Request signing (raw
- * bytes, HMAC header framing) lives in `signedJsonRequest`; this client just
- * adds path resolution and JSON/​error handling on top.
- */
+// Thin signed HTTP client; signing lives in `signedJsonRequest`, this adds path
+// resolution and JSON/error handling.
 export class SignedClient {
   constructor(
     private readonly baseURL: string,
@@ -33,11 +30,7 @@ export class SignedClient {
     await this.post('/aggregator/takehome/process', body)
   }
 
-  /**
-   * Fetches every casino-wide RTP row in `[from, to)`, following the keyset
-   * cursor until exhausted, so the verification sees the complete window
-   * regardless of page size.
-   */
+  /** Fetches every casino-wide RTP row in `[from, to)`, following the cursor. */
   async casinoRtp(from: string, to: string): Promise<CasinoRtpItem[]> {
     return this.pagedReport('/aggregator/takehome/reports/rtp/casino', from, to)
   }
@@ -62,7 +55,6 @@ export class SignedClient {
   }
 }
 
-/** A casino-wide RTP report row (snake_case wire shape). */
 export interface CasinoRtpItem {
   currency: string
   rounds: number
@@ -73,7 +65,6 @@ export interface CasinoRtpItem {
   rolled_back_win: number
 }
 
-/** A per-user RTP report row (snake_case wire shape). */
 export interface UserRtpItem extends CasinoRtpItem {
   user_id: string
 }

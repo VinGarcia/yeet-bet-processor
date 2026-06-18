@@ -1,12 +1,6 @@
-/**
- * Tiny shared CLI-config helpers for the runnable apps (`seed`, `gamerunner`).
- *
- * Every app resolves config the same way — `--flag=value` args layered over env
- * vars layered over defaults — so the parsing lives here once rather than being
- * copied per entrypoint.
- */
+// Shared CLI config: `--flag=value` args over env vars over defaults.
 
-/** Reads `--flag=value` style CLI args into a lookup map. */
+/** Reads `--flag=value` args into a lookup map. */
 export function parseFlags(argv: string[]): Map<string, string> {
   const flags = new Map<string, string>()
   for (const arg of argv) {

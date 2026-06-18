@@ -6,18 +6,12 @@ import { createDb } from '../../adapters/repo/kyselyrepo/create-db.js'
 import { migrate } from '../../adapters/repo/kyselyrepo/migrations/index.js'
 import type { DB } from '../../adapters/repo/kyselyrepo/schema.js'
 
-// The HMAC secret is invariant infrastructure config for the tests: no assertion
-// depends on its value, only that signing and verification share it. Exported so
-// tests that need to sign a request can reuse the exact same value.
+// Shared so tests can sign requests with the same value the app verifies against.
 export const TEST_SECRET = 'test'
 
 /**
- * Spins up the full integration stack for a test file: a fresh Postgres
- * testcontainer, a migrated database, and a listening Fastify app on an
- * ephemeral port.
- *
- * Returns the `db` handle (for seeding/resetting), the `baseURL` to hit, and a
- * `close()` that tears everything down (app, db, container) in order.
+ * Spins up the full integration stack for a test: a fresh Postgres testcontainer,
+ * a migrated DB, and a Fastify app on an ephemeral port. `close()` tears all down.
  */
 export async function createTestApp(): Promise<{
   db: Kysely<DB>

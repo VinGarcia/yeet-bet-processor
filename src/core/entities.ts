@@ -1,31 +1,16 @@
-/**
- * A user's balance in a single currency, expressed in the domain's camelCase
- * shape. `balance` is in the smallest currency unit (an integer count) so money
- * math stays exact. Adapters translate the storage row (snake_case) to/from
- * this entity at their boundary.
- */
+/** A user's balance in one currency. `balance` is in minor units (integer) so money math stays exact. */
 export interface Wallet {
   userId: string
   currency: string
   balance: number
 }
 
-/**
- * A single bet within a process request, in the camelCase domain shape.
- * `amount` is a positive integer in the smallest currency unit; it debits the
- * wallet and may overdraw (rejected per-step).
- */
 export interface BetAction {
   action: 'bet'
   actionId: string
   amount: number
 }
 
-/**
- * A single win within a process request, in the camelCase domain shape.
- * `amount` is a positive integer in the smallest currency unit; it credits the
- * wallet and never overdraws.
- */
 export interface WinAction {
   action: 'win'
   actionId: string
@@ -33,12 +18,10 @@ export interface WinAction {
 }
 
 /**
- * A single rollback within a process request, in the camelCase domain shape. It
- * reverses a prior `bet` or `win` referenced by `originalActionId` — the
- * direction is the OPPOSITE of the original (a bet's rollback credits, a win's
- * debits). It carries NO `amount`: the amount is derived from the referenced
- * original. A rollback that arrives before its original is recorded so the
- * later original becomes a noop (pre-rollback).
+ * Reverses a prior `bet`/`win` referenced by `originalActionId`, in the OPPOSITE
+ * direction (a bet's rollback credits, a win's debits). Carries no `amount` — it
+ * is derived from the original. One arriving before its original makes that later
+ * original a noop (pre-rollback).
  */
 export interface RollbackAction {
   action: 'rollback'
@@ -46,17 +29,10 @@ export interface RollbackAction {
   originalActionId: string
 }
 
-/**
- * A single action to apply, discriminated on `action`. For `bet`/`win` the
- * direction (debit vs credit) is encoded by the variant, not by the sign of
- * `amount` (always > 0); a `rollback` reverses the original it references.
- */
+// Discriminated on `action`; bet/win amounts are always > 0 (direction is the variant).
 export type Action = BetAction | WinAction | RollbackAction
 
-/**
- * A batch of actions to apply for one user/currency, with the optional game
- * context the caller echoes back. `actions` are processed in request order.
- */
+/** A batch of actions for one user/currency, processed in request order. */
 export interface UserActions {
   userId: string
   currency: string
@@ -66,15 +42,9 @@ export interface UserActions {
 }
 
 /**
- * One row of a casino-wide RTP report, aggregated per `currency` over a time
- * window. RTP and the totals deliberately EXCLUDE reversed rows (those whose
- * `rolledback` flag is true); the reversed amounts are surfaced separately in
- * `rolledBackBet`/`rolledBackWin` so a reader can see what was clawed back
- * without it polluting the headline RTP.
- *
- * `rounds` is the count of non-reversed `bet` rows in the window (one bet = one
- * round). `rtp` is `totalWin / totalBet`, or `null` when `totalBet` is 0 (no
- * non-reversed bets — an undefined ratio). All amounts are integer minor units.
+ * One casino-wide RTP row, per `currency` over a window. Totals and `rtp` EXCLUDE
+ * reversed rows; the clawed-back amounts are surfaced separately so they don't
+ * pollute headline RTP. `rtp` is `totalWin / totalBet`, or `null` when totalBet is 0.
  */
 export interface CasinoRtpRow {
   currency: string
@@ -86,10 +56,7 @@ export interface CasinoRtpRow {
   rolledBackWin: number
 }
 
-/**
- * One row of a per-user RTP report: a {@link CasinoRtpRow} additionally grouped
- * by `userId`, so the aggregate is per (`userId`, `currency`).
- */
+/** A {@link CasinoRtpRow} additionally grouped by `userId`. */
 export interface UserRtpRow extends CasinoRtpRow {
   userId: string
 }

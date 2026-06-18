@@ -6,8 +6,7 @@ import { buildApp } from './app.js'
 async function main(): Promise<void> {
   const db = createDb(config.databaseUrl)
 
-  // Self-migrate on boot so a fresh database is brought to the latest schema
-  // before the app starts serving traffic.
+  // Self-migrate on boot so a fresh DB reaches the latest schema before serving.
   await migrate(db)
 
   const app = await buildApp({ db, hmacSecret: config.hmacSecret })

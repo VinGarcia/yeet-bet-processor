@@ -1,42 +1,23 @@
 import { signedJsonRequest } from '../../helpers/crypto/hmac.js'
 
-/**
- * A closed-loop concurrent load generator for the signed `/process` endpoint.
- *
- * `concurrency` worker loops run in parallel; each one pulls the next request
- * index off a shared counter, signs the body via the shared `signedJsonRequest`
- * (same HMAC framing the gamerunner client uses), POSTs it, and records the
- * wall-clock latency. Workers stop as soon as the shared counter reaches
- * `totalRequests`, so the run drives exactly that many requests regardless of
- * how the work splits across workers (closed-loop, not open-loop: a fixed pool
- * of in-flight requests, the standard way to bound a benchmark's concurrency
- * without an unbounded request queue).
- */
+// Closed-loop load generator: `concurrency` workers pull the next request index
+// off a shared counter and stop at `totalRequests`, bounding in-flight requests
+// without an unbounded queue.
 
-/** Builds the signed POST body for request number `i` (0-based). */
 export type RequestFactory = (i: number) => unknown
 
 export interface LoadOptions {
-  /** Endpoint the benchmark hammers. */
   url: string
-  /** HMAC secret used to sign every raw body. */
   secret: string
-  /** Number of worker loops kept in flight at once. */
   concurrency: number
-  /** Total requests to send across all workers. */
   totalRequests: number
-  /** Produces the body for the i-th request. */
   makeBody: RequestFactory
 }
 
 export interface LoadResult {
-  /** Requests that returned a 2xx response. */
   ok: number
-  /** Requests that errored (non-2xx or transport failure). */
   errors: number
-  /** Per-request latencies in milliseconds, in completion order. */
   latenciesMs: number[]
-  /** Total wall-clock time of the run, in milliseconds. */
   wallMs: number
 }
 
@@ -46,11 +27,7 @@ export type FetchLike = (
   init: { method: 'POST'; headers: Record<string, string>; body: string },
 ) => Promise<{ ok: boolean }>
 
-/**
- * Runs the closed-loop load test and returns raw timings. Computing the
- * percentile summary is left to {@link summarize} so the engine stays a pure
- * "generate load, collect samples" unit that a test can drive deterministically.
- */
+/** Runs the load test and returns raw timings; {@link summarize} computes percentiles. */
 export async function runLoad(
   opts: LoadOptions,
   fetchImpl: FetchLike = fetch,
@@ -92,9 +69,7 @@ export interface LoadSummary {
   totalRequests: number
   ok: number
   errors: number
-  /** Requests completed per second over the whole run. */
   throughput: number
-  /** Latency percentiles in milliseconds. */
   latency: { p50: number; p95: number; p99: number; max: number }
 }
 

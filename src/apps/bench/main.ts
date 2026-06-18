@@ -7,7 +7,7 @@ import { mulberry32, uuidFrom } from '../gamerunner/rng.js'
 import { makeBetBody } from './request.js'
 import { runLoad, summarize, formatSummary } from './load.js'
 
-loadEnv({ path: 'config.env' })
+loadEnv()
 
 interface BenchConfig {
   users: number
@@ -55,10 +55,8 @@ function resolveConfig(argv: string[]): BenchConfig {
 async function main(): Promise<void> {
   const cfg = resolveConfig(process.argv.slice(2))
 
-  // Fund every player with enough headroom that the non-negative-balance guard
-  // never trips during the run: each user may be hit up to `totalRequests` times
-  // and each request bets `betAmount`. Wins fund nothing here (bet-only load),
-  // so balance is sized for the absolute worst case (all requests on one user).
+  // Worst-case headroom (all requests hit one user) so the funds guard never
+  // trips: bet-only load, no wins to refund.
   const balance = cfg.totalRequests * cfg.betAmount + 1
 
   const db = createDb(required('DATABASE_URL'))
@@ -83,10 +81,8 @@ async function main(): Promise<void> {
       `requests=${cfg.totalRequests} bet=${cfg.betAmount} ${cfg.currency}`,
   )
 
-  // Each request is a single signed bet for a distinct seeded user (round-robin)
-  // with a fresh UUID action_id, so no two requests collide on idempotency and
-  // load spreads evenly across wallet rows. UUIDs are drawn from a seeded RNG so
-  // the traffic is reproducible across runs with the same `--seed`.
+  // One signed bet per request, round-robin across users with fresh UUIDs (from
+  // the seeded RNG): no idempotency collisions, even load, reproducible per seed.
   const rng = mulberry32(cfg.seed)
   const result = await runLoad({
     url: `${cfg.baseURL}/aggregator/takehome/process`,

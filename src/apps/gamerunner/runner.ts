@@ -3,54 +3,37 @@ import type { Rng } from './rng.js'
 import { uuidFrom } from './rng.js'
 import { drawBetAmount, generateRound, TARGET_RTP, type BetRange } from './simulation.js'
 
-/** Everything needed to drive one simulated run against a live endpoint. */
 export interface RunOptions {
-  /** Distinct users to play (must already be seeded with balances). */
+  /** Distinct users to play (must already be seeded). */
   users: number
-  /** Rounds each user plays. Total rounds = `users * roundsPerUser`. */
   roundsPerUser: number
-  /** Currency every round is denominated in. */
   currency: string
-  /** Inclusive bet-size bounds (integer minor units), drawn per round. */
   betRange: BetRange
   /** User-id prefix; user `i` plays as `${userPrefix}${i}` (1-based). */
   userPrefix: string
-  /** Acceptable absolute deviation of the global RTP from the target. */
+  /** Acceptable absolute deviation of global RTP from the target. */
   tolerance: number
 }
 
-/** The outcome of a run, reported by the runner and asserted by the test. */
 export interface RunResult {
-  /** Total rounds (= bets) submitted. */
   rounds: number
-  /** Sum of all live bets, from the casino RTP report. */
   totalBet: number
-  /** Sum of all live wins, from the casino RTP report. */
   totalWin: number
-  /** Observed global RTP (`totalWin / totalBet`) for the run currency. */
   observedRtp: number
   /** Spread of per-user RTPs, a sanity check that variance is present. */
   perUserRtp: { min: number; max: number; count: number }
-  /** True iff `|observedRtp - TARGET_RTP| <= tolerance`. */
   pass: boolean
-  /** The half-open time window `[from, to)` the report was queried over. */
   window: { from: string; to: string }
 }
 
 /**
- * Plays `users * roundsPerUser` randomized rounds against the live endpoint,
- * then queries the casino + per-user RTP reports for the run's time window and
- * checks the observed global RTP against {@link TARGET_RTP} within `tolerance`.
+ * Plays randomized rounds against the live endpoint, then checks observed global
+ * RTP against {@link TARGET_RTP} within `tolerance`. Fully deterministic in the
+ * injected `rng` so a seed reproduces byte-identical traffic.
  *
- * The whole run is deterministic in `rng`: bet sizes, win coin-flips, win
- * multipliers and every `action_id`/`game_id` are drawn from it, so two runs
- * with the same seed submit byte-identical traffic. The RNG is injected (not a
- * module-global) so a test can pin a seed without monkey-patching.
- *
- * `now()` bounds the report window. We capture `from` before the first request
- * and `to` after the last, then widen by one second on each side so a clock
- * skew between this process and the DB's `now()` (the ledger stamps
- * `created_at` server-side) cannot drop boundary rows from the window.
+ * The report window is widened by 1s on each side: the ledger stamps
+ * `created_at` server-side, so clock skew between this process and the DB could
+ * otherwise drop boundary rows.
  */
 export async function runSimulation(
   client: SignedClient,

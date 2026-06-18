@@ -1,19 +1,9 @@
-/**
- * A seedable random source: a zero-arg function returning a float in `[0, 1)`,
- * the same tiny injected-function convention the seeder uses (`mulberry32`).
- * The game runner depends on this type — never on `Math.random` directly — so a
- * run is fully deterministic for a given seed, which the take-home calls out as
- * an explicit evaluation criterion ("deterministic seeds").
- */
+// Injected random source (float in [0,1)); the runner never touches Math.random,
+// so a run is fully deterministic for a given seed.
 export type Rng = () => number
 
-/**
- * mulberry32 — a tiny, fast, fully deterministic 32-bit PRNG factory. Given the
- * same 32-bit seed it returns a generator that always yields the same sequence
- * of floats in `[0, 1)`. Shared shape with the seeder's PRNG; here it is a
- * stateful generator (closure) rather than a pure index→value function because
- * the simulation draws an unbounded stream rather than one value per index.
- */
+// mulberry32: tiny deterministic 32-bit PRNG. Stateful closure (vs the seeder's
+// pure index→value form) because the simulation draws an unbounded stream.
 export function mulberry32(seed: number): Rng {
   let a = seed | 0
   return () => {
@@ -24,14 +14,8 @@ export function mulberry32(seed: number): Rng {
   }
 }
 
-/**
- * Draws a RFC-4122-shaped v4 UUID from the injected {@link Rng}. The endpoint's
- * `action_id`/`original_action_id` are Postgres `uuid` columns (validated by
- * `validateAction`), so the runner must emit well-formed UUIDs — and they must
- * come from the seeded RNG, not `crypto.randomUUID()`, for a run to stay
- * reproducible. The version (`4`) and variant (`8..b`) nibbles are fixed; the
- * remaining 122 bits are filled from the RNG.
- */
+// RFC-4122 v4 UUID drawn from the seeded {@link Rng} (not crypto.randomUUID) so
+// the ids stay reproducible; action_id columns are Postgres `uuid`.
 export function uuidFrom(rng: Rng): string {
   const hex = '0123456789abcdef'
   let out = ''

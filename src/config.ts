@@ -1,6 +1,6 @@
 import { config as loadEnv } from 'dotenv'
 
-loadEnv({ path: 'config.env' })
+loadEnv()
 
 function required(name: string): string {
   const value = process.env[name]

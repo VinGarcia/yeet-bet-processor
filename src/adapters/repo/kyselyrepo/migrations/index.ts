@@ -1,13 +1,8 @@
 import { Migrator, sql, type Kysely, type Migration, type MigrationProvider } from 'kysely'
 import type { DB } from '../schema.js'
 
-/**
- * Creates the `wallets` table: a per-user, per-currency balance ledger.
- *
- * `balance` is a non-negative integer (smallest currency unit). The check
- * constraint enforces the invariant at the storage layer so no code path can
- * drive a wallet negative. The primary key is (`user_id`, `currency`).
- */
+// `wallets`: per-(user, currency) balance. The CHECK enforces non-negativity at
+// the storage layer so no code path can drive a wallet negative.
 const createWallets: Migration = {
   async up(db: Kysely<DB>): Promise<void> {
     await db.schema
@@ -30,14 +25,8 @@ const createWallets: Migration = {
   },
 }
 
-/**
- * Creates the `transactions` table: an append-only ledger of processed actions.
- *
- * `action_id` is `UNIQUE`, which is the idempotency key — a replayed action
- * collides on insert and is never applied twice. `amount` is a non-negative
- * integer in the smallest currency unit. The (`user_id`, `created_at`) index
- * supports per-user ledger reads.
- */
+// `transactions`: append-only ledger. `action_id` is UNIQUE — the idempotency
+// key, so a replay collides on insert and is never applied twice.
 const createTransactions: Migration = {
   async up(db: Kysely<DB>): Promise<void> {
     await db.schema
@@ -53,10 +42,8 @@ const createTransactions: Migration = {
       )
       .addColumn('amount', 'bigint', (col) => col.notNull())
       .addColumn('original_action_id', 'uuid')
-      // Denormalized flag: an original (bet/win) is set true once a rollback
-      // reverses it, so the future RTP query can filter
-      // `WHERE type <> 'rollback' AND rolledback = false` instead of an anti-join
-      // against the rollback rows at scale. Rollback rows keep it false.
+      // Denormalized: set true on an original once reversed, so RTP can filter
+      // `rolledback = false` instead of an anti-join against rollback rows at scale.
       .addColumn('rolledback', 'boolean', (col) => col.notNull().defaultTo(false))
       .addColumn('created_at', 'timestamptz', (col) => col.notNull().defaultTo(sql`now()`))
       .execute()
@@ -74,13 +61,10 @@ const createTransactions: Migration = {
 }
 
 /**
- * Adds a partial index supporting the RTP report's windowed aggregate. The RTP
- * query scans `transactions` by a `created_at` window filtered to
- * `type IN ('bet', 'win')`; this index makes that range scan selective without
- * indexing the `rollback` rows (which the report never reads). It does NOT make
- * a huge-window per-user aggregate cheap — that inherently scans every matching
- * row in the window. A production system would maintain a rollup / materialized
- * per-period summary instead; that is a documented, accepted limitation here.
+ * Partial index for the RTP windowed aggregate: a `created_at` range scan
+ * filtered to `type IN ('bet','win')`, skipping rollback rows. It does NOT make
+ * a huge-window per-user aggregate cheap (that scans every matching row); a
+ * production system would maintain a rollup — an accepted limitation here.
  */
 const createRtpIndex: Migration = {
   async up(db: Kysely<DB>): Promise<void> {
@@ -96,27 +80,20 @@ const createRtpIndex: Migration = {
   },
 }
 
-/**
- * All migrations, keyed by name. Keys are lexicographically ordered so the
- * Migrator applies them in sequence. Add new migrations with the next prefix.
- */
+// Lexicographically ordered keys; the Migrator applies them in sequence.
 export const migrations: Record<string, Migration> = {
   '001_create_wallets': createWallets,
   '002_create_transactions': createTransactions,
   '003_create_rtp_index': createRtpIndex,
 }
 
-// In-code provider: returns the `migrations` object directly. Avoids
-// FileMigrationProvider, which resolves paths on disk and is brittle under ESM.
+// In-code provider, avoiding FileMigrationProvider (brittle path resolution under ESM).
 const provider: MigrationProvider = {
   getMigrations(): Promise<Record<string, Migration>> {
     return Promise.resolve(migrations)
   },
 }
 
-/**
- * Runs all pending migrations to latest. Throws if any migration errored.
- */
 export async function migrate(db: Kysely<DB>): Promise<void> {
   const migrator = new Migrator({ db, provider })
   const { error, results } = await migrator.migrateToLatest()

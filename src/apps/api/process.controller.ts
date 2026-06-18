@@ -4,10 +4,7 @@ import type { Action } from '../../core/entities.js'
 import { BadRequestError } from '../../core/errors.js'
 import { validateAction } from '../../core/validators.js'
 
-/**
- * The external request shape, after narrowing the parsed body. The aggregator
- * speaks snake_case; the controller maps it to the camelCase domain.
- */
+// The narrowed request shape; the aggregator speaks snake_case, mapped to camelCase here.
 interface ProcessRequest {
   userId: string
   currency: string
@@ -16,16 +13,8 @@ interface ProcessRequest {
   actions: Action[]
 }
 
-/**
- * Narrows one unvalidated array element to an {@link Action}. `bet` and `win`
- * share the same wire shape (string `action_id`, positive-integer `amount`);
- * they differ only by `action`, which the domain uses to pick debit vs credit.
- * A `rollback` carries `original_action_id` (a string) and NO `amount` — the
- * amount is derived from the referenced original. Any other type is rejected as
- * a bad request (a 400 is safer than silently dropping or misapplying them).
- * The narrowed action's domain invariants are then enforced by the core
- * `validateAction`.
- */
+// Narrows one raw element to an {@link Action}; bet/win share a shape, rollback
+// carries original_action_id and no amount. validateAction enforces invariants after.
 function parseAction(raw: unknown): Action {
   if (typeof raw !== 'object' || raw === null) {
     throw new BadRequestError('each action must be a JSON object')
@@ -62,12 +51,7 @@ function parseAction(raw: unknown): Action {
   return action
 }
 
-/**
- * Narrows an unvalidated parsed body to {@link ProcessRequest} without `as` or
- * `any`. `user_id` and `currency` are required strings; `game`/`game_id` are
- * optional strings echoed through; `actions` is optional and defaults to an
- * empty list (a balance-only request).
- */
+// Narrows the parsed body to {@link ProcessRequest}; absent `actions` = a balance-only request.
 function parseProcessRequest(body: unknown): ProcessRequest {
   if (typeof body !== 'object' || body === null) {
     throw new BadRequestError('request body must be a JSON object')
@@ -96,12 +80,8 @@ function parseProcessRequest(body: unknown): ProcessRequest {
 }
 
 /**
- * Registers the `POST /aggregator/takehome/process` endpoint.
- *
- * A request with no `actions` is a balance-only lookup: it returns the wallet's
- * balance (0 when the user has no wallet). Requests carrying `actions` apply the
- * batch atomically and return the new balance, the per-action transactions, and
- * the echoed `game_id`.
+ * Registers `POST /aggregator/takehome/process`. No `actions` = a balance-only
+ * lookup (0 for an unknown user); otherwise the batch is applied atomically.
  */
 export function registerProcessController(app: FastifyInstance, repo: Repo): void {
   app.post('/aggregator/takehome/process', async (request, reply) => {

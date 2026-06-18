@@ -3,17 +3,10 @@ import type { CasinoRtpRow, UserRtpRow } from '../../core/entities.js'
 import type { Repo, RtpReportQuery } from '../../adapters/repo/contracts.js'
 import { BadRequestError } from '../../core/errors.js'
 
-// A strict ISO-8601 datetime: `YYYY-MM-DDThh:mm:ss` with optional fractional
-// seconds and a REQUIRED `Z`/`±hh:mm` offset. The offset is mandatory because an
-// offset-less timestamp would be parsed as server-local time, silently shifting
-// the report window per host; requiring it keeps the window unambiguous (UTC or
-// explicit) and turns a malformed `from`/`to` into a clean 400.
+// Strict ISO-8601 with a REQUIRED `Z`/`±hh:mm` offset: an offset-less timestamp
+// would parse as server-local time, silently shifting the report window per host.
 const ISO_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/
 
-/**
- * Parses one ISO-8601 datetime field, throwing a 400 on anything malformed.
- * Exported for unit testing of the {@link ISO_DATETIME_RE} acceptance boundary.
- */
 export function parseIsoDatetime(value: unknown, field: string): Date {
   if (typeof value !== 'string' || !ISO_DATETIME_RE.test(value)) {
     throw new BadRequestError(`${field} must be an ISO-8601 datetime`)
@@ -23,11 +16,7 @@ export function parseIsoDatetime(value: unknown, field: string): Date {
   return new Date(ms)
 }
 
-/**
- * Narrows an unvalidated parsed body to {@link RtpReportQuery} without `as` or
- * `any`. `from`/`to` are required ISO-8601 datetimes with `from <= to`; `cursor`
- * is an optional opaque string; `limit` is an optional positive integer.
- */
+// Narrows the parsed body to {@link RtpReportQuery}; from/to are required ISO with from <= to.
 function parseRtpReportRequest(body: unknown): RtpReportQuery {
   if (typeof body !== 'object' || body === null) {
     throw new BadRequestError('request body must be a JSON object')
@@ -55,7 +44,6 @@ function parseRtpReportRequest(body: unknown): RtpReportQuery {
   return { from, to, cursor, limit }
 }
 
-/** Maps a casino RTP row to its snake_case wire shape. */
 function toCasinoWire(r: CasinoRtpRow): Record<string, unknown> {
   return {
     currency: r.currency,
@@ -68,20 +56,11 @@ function toCasinoWire(r: CasinoRtpRow): Record<string, unknown> {
   }
 }
 
-/** Maps a per-user RTP row to its snake_case wire shape (casino fields + user_id). */
 function toUserWire(r: UserRtpRow): Record<string, unknown> {
   return { user_id: r.userId, ...toCasinoWire(r) }
 }
 
-/**
- * Registers the two HMAC-signed RTP report endpoints inside the protected scope:
- *
- *   POST /aggregator/takehome/reports/rtp/users  — per (user, currency)
- *   POST /aggregator/takehome/reports/rtp/casino — per currency, all users
- *
- * Both take `{ from, to, cursor?, limit? }`, return `{ items, cursor }`, and
- * page via an opaque keyset cursor (null once exhausted).
- */
+/** Registers the two HMAC-signed RTP report endpoints (per-user and casino-wide). */
 export function registerReportControllers(app: FastifyInstance, repo: Repo): void {
   app.post('/aggregator/takehome/reports/rtp/users', async (request, reply) => {
     const query: RtpReportQuery = parseRtpReportRequest(request.body)

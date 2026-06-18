@@ -10,7 +10,7 @@ import {
   type SupportedCurrency,
 } from './seed.js'
 
-loadEnv({ path: 'config.env' })
+loadEnv()
 
 function resolveOptions(argv: string[]): SeedOptions {
   const flags = parseFlags(argv)
