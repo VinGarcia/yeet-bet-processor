@@ -19,7 +19,7 @@ WIP.
   plus a bare `UPDATE` (which silently matches zero rows for a brand-new user,
   losing the debit while the ledger still writes), we run a single
   `INSERT … ON CONFLICT (user_id, currency) DO UPDATE SET balance = wallets.balance
-  RETURNING balance`. The no-op `DO UPDATE` still takes the row lock and returns
+RETURNING balance`. The no-op `DO UPDATE` still takes the row lock and returns
   the current balance; if the row is absent it is created at 0. This guarantees
   the row exists and is row-locked before the per-step computation, so concurrent
   first-bet batches for the same new user **serialize** (no lost update) and
@@ -27,7 +27,7 @@ WIP.
 - **A bet against a non-existent wallet lazily creates it at balance 0.** There
   is no separate "open wallet" step: the first action for a user/currency
   materializes the wallet (at 0) as part of the ensure-and-lock upsert. With
-  bet-only and a start balance of 0, any *positive* first bet still rejects via
+  bet-only and a start balance of 0, any _positive_ first bet still rejects via
   the per-step check (`0 - amount < 0`), and the just-created row is rolled back
   with the transaction — so no orphan wallet and no orphan ledger row remain.
 - **Batch failure is whole-request rollback (atomic).** The spec says to process
@@ -60,7 +60,7 @@ WIP.
   - **Pre-rollback (spec hard requirement).** A rollback that references a
     not-yet-seen original is **recorded** (a `rollback` row with `amount = 0`,
     no balance change) and still returns a `tx_id`. When the original `bet`/`win`
-    later arrives — a future request *or* later in the same batch — it becomes a
+    later arrives — a future request _or_ later in the same batch — it becomes a
     **noop**: persisted (so it has a `tx_id` and idempotency holds) but with no
     balance effect.
   - **Rollback ordering within a batch (order-independent noop).** A `bet`/`win`
@@ -173,16 +173,16 @@ same.
 
 **Config knobs** (CLI flag wins over env var wins over default):
 
-| Flag         | Env             | Default      | Meaning                                     |
-| ------------ | --------------- | ------------ | ------------------------------------------- |
-| `--count`    | `SEED_COUNT`    | `1000`       | Number of wallets to create                 |
-| `--currency` | `SEED_CURRENCY` | `USD`        | One of `USD`, `EUR`, `BRL`, `GBP`           |
-| `--balance`  | `SEED_BALANCE`  | —            | Fixed balance (sets both bounds)            |
-| `--min`      | `SEED_MIN`      | `10000`      | Balance range lower bound (minor units)     |
-| `--max`      | `SEED_MAX`      | `1000000`    | Balance range upper bound (minor units)     |
-| `--seed`     | `SEED_SEED`     | `1`          | PRNG seed for reproducible balances         |
-| `--prefix`   | `SEED_PREFIX`   | `seed-user-` | Generated user-id prefix                    |
-| `--chunk`    | `SEED_CHUNK`    | `1000`       | Rows per bulk INSERT (scales to far more)   |
+| Flag         | Env             | Default      | Meaning                                   |
+| ------------ | --------------- | ------------ | ----------------------------------------- |
+| `--count`    | `SEED_COUNT`    | `1000`       | Number of wallets to create               |
+| `--currency` | `SEED_CURRENCY` | `USD`        | One of `USD`, `EUR`, `BRL`, `GBP`         |
+| `--balance`  | `SEED_BALANCE`  | —            | Fixed balance (sets both bounds)          |
+| `--min`      | `SEED_MIN`      | `10000`      | Balance range lower bound (minor units)   |
+| `--max`      | `SEED_MAX`      | `1000000`    | Balance range upper bound (minor units)   |
+| `--seed`     | `SEED_SEED`     | `1`          | PRNG seed for reproducible balances       |
+| `--prefix`   | `SEED_PREFIX`   | `seed-user-` | Generated user-id prefix                  |
+| `--chunk`    | `SEED_CHUNK`    | `1000`       | Rows per bulk INSERT (scales to far more) |
 
 ## Health check
 
@@ -267,7 +267,7 @@ Decisions:
   are the sums of `amount` on reversed `bet` / `win` rows — so a reader can see
   what was clawed back without it distorting the headline RTP.
 - **`rounds` = count of non-reversed `bet` rows** in the window (one bet = one
-  round). *Alternative considered:* counting **distinct `game_id`** as rounds. We
+  round). _Alternative considered:_ counting **distinct `game_id`** as rounds. We
   chose one-bet-per-round deliberately: it is unambiguous, needs no extra index,
   and matches "RTP per wager". If a round is later defined as a full game
   regardless of re-bets, switch to `count(distinct game_id)`.
@@ -282,7 +282,7 @@ Decisions:
   skipped rows, degrading as you page deeper across billions of rows. We order by
   the group key — (`currency`, `user_id`) per-user, `currency` casino-wide — and
   the cursor encodes the last row's key; the next page adds a row-value predicate
-  (`(currency, user_id) > (…)`). Note this trims only the *emitted* result rows on
+  (`(currency, user_id) > (…)`). Note this trims only the _emitted_ result rows on
   later pages — it is **not** a fresh indexed seek into the raw table. The query
   groups and aggregates over the whole in-window row set every page (the only
   index is on `created_at`, not the group key), then the keyset predicate filters
@@ -292,7 +292,7 @@ Decisions:
   implementation detail we are free to change.
 - **Single windowed scan with FILTER aggregates.** Both the non-reversed sums and
   the reversed sums come from one pass over the window (`count(*)`/`sum(amount)
-  FILTER (WHERE …)`), so there is no second query and no rollback anti-join.
+FILTER (WHERE …)`), so there is no second query and no rollback anti-join.
 - **Supporting index.** Migration `003` adds a partial index
   `transactions (created_at) WHERE type IN ('bet', 'win')` to make the window
   scan selective without indexing the `rollback` rows the report never reads.
@@ -302,3 +302,74 @@ every matching row in that window — the index bounds the range but does not ma
 an enormous span cheap. A production system would maintain a rollup /
 materialized per-period summary and read the report from that. That is out of
 scope for this take-home and accepted as a known limitation.
+
+## RTP game runner
+
+`pnpm gamerunner` plays an arbitrary number of randomized rounds for an arbitrary
+number of users against the **live** `/process` endpoint, then calls the RTP
+report for the same time window and prints a pass/fail summary.
+
+```sh
+# 1) start Postgres + the API (e.g. docker compose up, or `pnpm dev`)
+# 2) point the runner at it and play
+pnpm gamerunner                                   # 50 users × 200 rounds (defaults)
+pnpm gamerunner --users=1000 --rounds=5000        # bigger run
+pnpm gamerunner --seed=42 --url=http://localhost:3000
+```
+
+It seeds the players first by reusing the existing `seedWallets` tooling (direct
+wallet inserts, so the bootstrap liquidity never pollutes RTP), then submits one
+signed `bet` (+ optional `win`) batch per round, then verifies the global RTP.
+
+**RTP distribution.** Each round is a `bet` followed by a _probabilistic_ win —
+never a flat "pay 95% of the bet". With probability `p = 0.8` the round wins and
+pays `bet × U`, where `U` is **uniform on `[0, 2·0.95/p]` = `[0, 2.375]`**; with
+probability `1 − p` it pays nothing. The expected payout is therefore
+
+```
+E[payout] = p · bet · E[U] = p · bet · (0.95 / p) = 0.95 · bet,
+```
+
+so the **expected** RTP is exactly `0.95` while each round's realized payout
+carries genuine variance (zero on a loss, up to `2.375×` the bet on a win). By
+the law of large numbers the **observed** global RTP converges to `0.95` as the
+sample grows; per-user RTPs show real spread, which the runner surfaces as a
+`min`/`max` band. `p = 0.8` (vs a coin-flip) keeps meaningful per-round variance
+while converging fast enough that a few thousand rounds already land inside the
+tolerance — useful for a deterministic CI test.
+
+**Determinism.** All randomness — bet sizes, the win coin-flip, the win
+multiplier, and every `action_id`/`game_id` UUID — is drawn from a single
+**seedable** `mulberry32` RNG injected as a tiny `Rng = () => number` function
+(the same injection convention as the seeder's clock/PRNG). Two runs with the
+same `--seed` submit byte-identical traffic and produce identical totals, which
+the functional test asserts directly.
+
+**Verification & tolerance.** After the run, the runner reads the casino-wide RTP
+report for `[from, to)` (the window is widened by ±1s to absorb client/DB clock
+skew on the server-stamped `created_at`) and checks
+`|observed − 0.95| ≤ tolerance`. The default tolerance is **±0.01 (±1%)**,
+matching the spec; it exits `0` on pass and `1` on fail. The convergence test
+uses a looser **±0.02** because an 8 000-round sample (kept small so the test is
+fast) has more sampling noise than a production-scale run — at ~80 000 rounds the
+same seeds already sit inside ±0.01.
+
+**Config knobs** (CLI flag wins over env var wins over default):
+
+| Flag          | Env            | Default    | Meaning                                       |
+| ------------- | -------------- | ---------- | --------------------------------------------- |
+| `--users`     | `GR_USERS`     | `50`       | Distinct players (each seeded with a balance) |
+| `--rounds`    | `GR_ROUNDS`    | `200`      | Rounds per user (total = users × rounds)      |
+| `--currency`  | `GR_CURRENCY`  | `USD`      | One of `USD`, `EUR`, `BRL`, `GBP`             |
+| `--bet-min`   | `GR_BET_MIN`   | `10`       | Min bet size, minor units (drawn per round)   |
+| `--bet-max`   | `GR_BET_MAX`   | `100`      | Max bet size, minor units                     |
+| `--seed`      | `GR_SEED`      | `1`        | RNG seed (deterministic runs)                 |
+| `--tolerance` | `GR_TOLERANCE` | `0.01`     | Max abs deviation of global RTP from `0.95`   |
+| `--balance`   | `GR_BALANCE`   | auto       | Fixed start balance; auto-sized if omitted    |
+| `--prefix`    | `GR_PREFIX`    | `gr-user-` | Generated player-id prefix                    |
+| `--url`       | `GR_BASE_URL`  | `:$PORT`   | Base URL of the running API                   |
+
+**Assumptions.** The runner only exercises bets and wins (no rollbacks /
+duplicates, per the spec). Start balances are auto-sized to cover the worst-case
+losing streak (`rounds × max-bet × 3`) so the non-negative-balance guard never
+trips mid-run; pass `--balance` to override.

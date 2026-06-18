@@ -5,7 +5,13 @@ import { createDb } from '../../adapters/repo/kyselyrepo/create-db.js'
 import { migrate } from '../../adapters/repo/kyselyrepo/migrations/index.js'
 import { resetTestDB } from '../../adapters/repo/kyselyrepo/test-helpers.js'
 import type { DB } from '../../adapters/repo/kyselyrepo/schema.js'
-import { seedWallets, balanceFor, userIdFor, DEFAULT_SEED_OPTIONS, type SeedOptions } from './seed.js'
+import {
+  seedWallets,
+  balanceFor,
+  userIdFor,
+  DEFAULT_SEED_OPTIONS,
+  type SeedOptions,
+} from './seed.js'
 
 let container: Awaited<ReturnType<PostgreSqlContainer['start']>>
 let db: Kysely<DB>

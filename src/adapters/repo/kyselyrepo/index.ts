@@ -502,7 +502,9 @@ export class KyselyRepo implements Repo {
     const page = hasMore ? rows.slice(0, limit) : rows
     const last = page[page.length - 1]
     const cursor =
-      hasMore && last !== undefined ? encodeCursor({ currency: last.currency, userId: last.user_id }) : null
+      hasMore && last !== undefined
+        ? encodeCursor({ currency: last.currency, userId: last.user_id })
+        : null
 
     return { items: page.map((r) => ({ ...mapCasinoRow(r), userId: r.user_id })), cursor }
   }
@@ -532,8 +534,7 @@ export class KyselyRepo implements Repo {
     const hasMore = rows.length > limit
     const page = hasMore ? rows.slice(0, limit) : rows
     const last = page[page.length - 1]
-    const cursor =
-      hasMore && last !== undefined ? encodeCursor({ currency: last.currency }) : null
+    const cursor = hasMore && last !== undefined ? encodeCursor({ currency: last.currency }) : null
 
     return { items: page.map(mapCasinoRow), cursor }
   }

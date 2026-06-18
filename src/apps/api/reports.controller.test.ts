@@ -83,8 +83,22 @@ describe('POST /reports/rtp/users (per-user RTP)', () => {
       { userId: 'user-1', currency: 'USD', type: 'bet', amount: 1000, createdAt: MID },
       { userId: 'user-1', currency: 'USD', type: 'bet', amount: 500, createdAt: MID },
       { userId: 'user-1', currency: 'USD', type: 'win', amount: 1400, createdAt: MID },
-      { userId: 'user-1', currency: 'USD', type: 'bet', amount: 200, createdAt: MID, rolledback: true },
-      { userId: 'user-1', currency: 'USD', type: 'win', amount: 100, createdAt: MID, rolledback: true },
+      {
+        userId: 'user-1',
+        currency: 'USD',
+        type: 'bet',
+        amount: 200,
+        createdAt: MID,
+        rolledback: true,
+      },
+      {
+        userId: 'user-1',
+        currency: 'USD',
+        type: 'win',
+        amount: 100,
+        createdAt: MID,
+        rolledback: true,
+      },
       { userId: 'user-1', currency: 'USD', type: 'rollback', amount: 0, createdAt: MID },
       // user-1 / EUR: a separate (user, currency) group.
       { userId: 'user-1', currency: 'EUR', type: 'bet', amount: 100, createdAt: MID },
@@ -120,7 +134,14 @@ describe('POST /reports/rtp/users (per-user RTP)', () => {
       // Only a live win → total_bet 0 → rtp null.
       { userId: 'wins-only', currency: 'USD', type: 'win', amount: 500, createdAt: MID },
       // Only a reversed bet → still total_bet 0 → rtp null, but rolled_back_bet set.
-      { userId: 'reversed-only', currency: 'USD', type: 'bet', amount: 300, createdAt: MID, rolledback: true },
+      {
+        userId: 'reversed-only',
+        currency: 'USD',
+        type: 'bet',
+        amount: 300,
+        createdAt: MID,
+        rolledback: true,
+      },
     ])
 
     const res = await postSignedTo(USERS_URL, JSON.stringify({ from: FROM, to: TO }))
@@ -164,7 +185,9 @@ describe('POST /reports/rtp/users (per-user RTP)', () => {
   // with no overlap and no gap: a row stamped exactly at T lands in the second.
   it('adjacent half-open windows do not double-count a boundary row', async () => {
     const boundary = '2026-01-10T00:00:00.000Z'
-    await seedTx([{ userId: 'seam', currency: 'USD', type: 'bet', amount: 100, createdAt: boundary }])
+    await seedTx([
+      { userId: 'seam', currency: 'USD', type: 'bet', amount: 100, createdAt: boundary },
+    ])
 
     const before = await postSignedTo(
       USERS_URL,
