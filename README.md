@@ -373,3 +373,87 @@ same seeds already sit inside ±0.01.
 duplicates, per the spec). Start balances are auto-sized to cover the worst-case
 losing streak (`rounds × max-bet × 3`) so the non-negative-balance guard never
 trips mid-run; pass `--balance` to override.
+
+## Performance benchmark
+
+`pnpm bench` drives the `/process` endpoint under **concurrent load** and reports
+throughput and latency percentiles. Where the game runner verifies _correctness_
+(RTP convergence), the benchmark verifies _capacity_: how many signed bets per
+second the single endpoint sustains and at what latency.
+
+```sh
+# 1) start Postgres + the API (docker compose up, or `pnpm dev`)
+# 2) point the benchmark at it
+pnpm bench                                              # 1000 users, 50 conc, 10k reqs
+pnpm bench --users=1000 --concurrency=100 --requests=200000
+pnpm bench --concurrency=200 --requests=50000 --url=http://localhost:3000
+```
+
+It first reuses the existing `seedWallets` tooling to populate the players
+(direct wallet inserts, so bootstrap liquidity never pollutes RTP), funded with
+enough headroom that the non-negative-balance guard never trips mid-run. Then it
+fires `--requests` signed `bet` batches and aggregates the timings.
+
+### Methodology
+
+- **Load shape — closed-loop.** `--concurrency` worker loops run in parallel;
+  each pulls the next request index off a shared counter, sends one request, and
+  immediately starts the next. A fixed pool of in-flight requests (not an
+  unbounded open-loop queue) is the standard way to bound a benchmark's
+  concurrency, so the reported latencies reflect real server service time rather
+  than client-side queue backlog. The run stops at exactly `--requests` total.
+- **Traffic.** Each request is a single signed `bet` for a distinct seeded user
+  (round-robin across `--users`) with a fresh UUID `action_id`, so no two
+  requests collide on idempotency and load spreads evenly across wallet rows —
+  exercising the per-wallet upsert-lock contention path, not one hot row. UUIDs
+  are drawn from a seeded `mulberry32` RNG, so the traffic is reproducible.
+- **Auth.** Every request is signed with **HMAC-SHA256 over the raw body bytes**
+  (the exact JSON that is sent, signed once), reusing `helpers/crypto/hmac.ts` —
+  so the benchmark measures the real signed-request path, 403s and all.
+- **What's measured.** Per-request wall-clock latency (client `performance.now()`
+  around `fetch`). Reported: **throughput** (`completed / wall-time`), latency
+  **p50 / p95 / p99 / max** (nearest-rank percentiles), and an **error count**
+  (any non-2xx or transport failure). A non-zero error count exits `1`.
+- **Hardware caveat.** Numbers below were captured on a developer laptop with the
+  API (`tsx`, single Node process) and Postgres on the **same host**, so client,
+  app and DB contend for the same cores — treat them as a _relative_ baseline for
+  comparing changes, not an absolute production ceiling.
+- **Single-node vs horizontal scaling.** This measures **one** stateless API
+  process against **one** Postgres. The API holds no per-request state, so
+  throughput scales horizontally by running more API instances behind a load
+  balancer; the shared Postgres is then the bottleneck. Per-wallet writes
+  serialize only on the same `(user_id, currency)` row (the upsert-lock), so
+  spreading load across many users — as this harness does — scales near-linearly
+  until DB CPU / IO saturates, at which point read replicas (for the RTP reports)
+  and partitioning/sharding the ledger by user are the next levers.
+
+### Sample results
+
+Captured locally (API via `tsx` + Postgres 17 on the same laptop, 1000 seeded
+users, `--bet=10`). Indicative only — see the hardware caveat above.
+
+| Concurrency | Requests | Throughput (req/s) | p50    | p95    | p99    | max     | Errors |
+| ----------- | -------- | ------------------ | ------ | ------ | ------ | ------- | ------ |
+| 16          | 10 000   | ~2020              | 7.4ms  | 12.2ms | 16.4ms | 51.9ms  | 0      |
+| 50          | 20 000   | ~1510              | 32.5ms | 41.6ms | 51.7ms | 127.1ms | 0      |
+| 100         | 20 000   | ~2020              | 48.2ms | 60.8ms | 87.3ms | 228.3ms | 0      |
+
+Latency climbs with concurrency (more requests queue behind the shared DB
+connection pool) while throughput plateaus — the expected closed-loop signature
+of a saturated single node. On dedicated, separately-hosted DB hardware and a
+compiled (`pnpm build` + `node`) API the absolute numbers improve; the
+**horizontal-scaling** path above is how this reaches the spec's thousands of
+users / millions of rounds.
+
+**Config knobs** (CLI flag wins over env var wins over default):
+
+| Flag            | Env                 | Default       | Meaning                                       |
+| --------------- | ------------------- | ------------- | --------------------------------------------- |
+| `--concurrency` | `BENCH_CONCURRENCY` | `50`          | Worker loops kept in flight at once           |
+| `--requests`    | `BENCH_REQUESTS`    | `10000`       | Total requests to send                        |
+| `--users`       | `BENCH_USERS`       | `1000`        | Distinct seeded players load spreads across   |
+| `--currency`    | `BENCH_CURRENCY`    | `USD`         | One of `USD`, `EUR`, `BRL`, `GBP`             |
+| `--bet`         | `BENCH_BET`         | `10`          | Bet size per request, minor units             |
+| `--seed`        | `BENCH_SEED`        | `1`           | RNG seed (reproducible action/​game UUIDs)     |
+| `--prefix`      | `BENCH_PREFIX`      | `bench-user-` | Generated player-id prefix                    |
+| `--url`         | `BENCH_BASE_URL`    | `:$PORT`      | Base URL of the running API                   |

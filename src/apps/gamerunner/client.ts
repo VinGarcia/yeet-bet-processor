@@ -1,10 +1,9 @@
-import { sign } from '../../helpers/crypto/hmac.js'
+import { signedJsonRequest } from '../../helpers/crypto/hmac.js'
 
 /**
- * A thin signed HTTP client for the take-home endpoints. Every request is signed
- * with HMAC-SHA256 over the EXACT raw JSON bytes that are sent (we serialize
- * once, sign that string, and POST the same string) so the server verifies
- * against the bytes as received — never a re-serialization.
+ * A thin signed HTTP client for the take-home endpoints. Request signing (raw
+ * bytes, HMAC header framing) lives in `signedJsonRequest`; this client just
+ * adds path resolution and JSON/​error handling on top.
  */
 export class SignedClient {
   constructor(
@@ -13,15 +12,8 @@ export class SignedClient {
   ) {}
 
   private async post(path: string, body: unknown): Promise<unknown> {
-    const raw = JSON.stringify(body)
-    const res = await fetch(`${this.baseURL}${path}`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `HMAC-SHA256 ${sign(this.secret, raw)}`,
-      },
-      body: raw,
-    })
+    const { init } = signedJsonRequest(this.secret, body)
+    const res = await fetch(`${this.baseURL}${path}`, init)
     const text = await res.text()
     if (!res.ok) {
       throw new Error(`POST ${path} → ${res.status}: ${text}`)

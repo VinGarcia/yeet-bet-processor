@@ -12,6 +12,7 @@
     "start": "node dist/apps/api/main.js",
     "seed": "tsx src/apps/seed/main.ts",
     "gamerunner": "tsx src/apps/gamerunner/main.ts",
+    "bench": "tsx src/apps/bench/main.ts",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
