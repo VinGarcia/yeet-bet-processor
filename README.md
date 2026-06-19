@@ -52,18 +52,18 @@ Flags (CLI or env, CLI wins) are listed at the top of each tool's source.
 
 One business endpoint plus two reports, all `POST` and HMAC-signed; `/health` is open.
 
-- `POST /aggregator/takehome/process` — bets/wins/rollbacks (or balance-only when
+- `POST /aggregator/takehome/process`: bets/wins/rollbacks (or balance-only when
   `actions` is empty). Returns `{ game_id, transactions: [{action_id, tx_id}], balance }`.
-- `POST /aggregator/takehome/reports/rtp/users` — RTP per (user, currency); pass an
+- `POST /aggregator/takehome/reports/rtp/users`: RTP per (user, currency); pass an
   optional `user_id` in the body to restrict it to a single user.
-- `POST /aggregator/takehome/reports/rtp/casino` — RTP per currency.
-- `GET /health` — liveness/readiness (`200` ok / `503` if DB down), unauthenticated.
+- `POST /aggregator/takehome/reports/rtp/casino`: RTP per currency.
+- `GET /health`: liveness/readiness (`200` ok / `503` if DB down), unauthenticated.
 
 ### Auth
 
 `Authorization: HMAC-SHA256 <hex>`, where `<hex>` is HMAC-SHA256 over the **raw
-request body bytes** (verified pre-parse, constant-time). Signing the raw bytes —
-not re-serialized JSON — keeps whitespace-sensitive payloads verifiable. Missing
+request body bytes** (verified pre-parse, constant-time). Signing the raw bytes
+(not re-serialized JSON) keeps whitespace-sensitive payloads verifiable. Missing
 or invalid → `403`.
 
 ## Design decisions
@@ -76,10 +76,10 @@ or invalid → `403`.
   `[bet 100, win 200]` on a balance of 50.
 - **Ensure-and-lock wallet upsert.** One `INSERT … ON CONFLICT … DO UPDATE
   RETURNING balance` locks (and lazily creates, at 0) the wallet row before the
-  check, so concurrent same-user batches serialize — no lost updates, wallet and
-  ledger never diverge.
+  check, so concurrent same-user batches serialize (no lost updates, wallet and
+  ledger never diverge).
 - **Idempotency.** A replayed `action_id` returns its original `tx_id` and never
-  re-applies — enforced by the wallet lock (the loser's context SELECT sees the
+  re-applies, enforced by the wallet lock (the loser's context SELECT sees the
   committed row), with `UNIQUE(action_id)` as a backstop.
 
 **Rollbacks**
@@ -88,7 +88,7 @@ or invalid → `403`.
   the amount is derived from the original, not sent.
 - **Pre-rollback (spec requirement).** A rollback of a not-yet-seen action is
   stored (`amount = 0`) and returns a `tx_id`; when the original later arrives it
-  becomes a **noop**. Order within a batch is irrelevant — `[bet A, rollback A]`
+  becomes a **noop**. Order within a batch is irrelevant: `[bet A, rollback A]`
   and `[rollback A, bet A]` behave identically.
 - **Clawback overdraw** (rolling back a win past zero) rejects with code `100`,
   like a bet.
@@ -98,13 +98,13 @@ or invalid → `403`.
 **Scale**
 
 - **`rolledback` flag per ledger row** (denormalized) lets the RTP query filter
-  `type IN ('bet','win') AND rolledback = false` — a plain indexable predicate
+  `type IN ('bet','win') AND rolledback = false`, a plain indexable predicate
   instead of a `NOT EXISTS` anti-join that worsens as the ledger grows. It is set
   on the path that already knows the reversal happened (no extra round-trip) and
   stays correct because a double-rollback is rejected, so each original is
   reversed at most once.
 - **Fixed statement count per batch** regardless of size (upsert, one context
-  SELECT, bulk insert, at most one flag UPDATE, one balance UPDATE) — not a giant
+  SELECT, bulk insert, at most one flag UPDATE, one balance UPDATE), not a giant
   CTE. Step resolution is in-memory.
 
 **RTP reporting**
@@ -115,17 +115,17 @@ or invalid → `403`.
 - `rounds` = non-reversed bets in the window (one bet = one round; an alternative
   is `count(distinct game_id)`).
 - **Half-open `[from, to)`** window, so adjacent windows neither overlap nor gap.
-- **Keyset (cursor) pagination**, not offset — stable and gap-free across billions
+- **Keyset (cursor) pagination**, not offset, stable and gap-free across billions
   of rows (the cursor is an opaque token). A partial index
   `transactions(created_at) WHERE type IN ('bet','win')` keeps the window scan
   selective.
 
-**Performance** — `pnpm bench` drives `/process` under closed-loop concurrency and
+**Performance:** `pnpm bench` drives `/process` under closed-loop concurrency and
 reports throughput + p50/p95/p99. One stateless API scales horizontally behind a
 load balancer; per-wallet writes serialize only on the same `(user_id, currency)`
 row, so load spread across users scales near-linearly until Postgres saturates
 (then read replicas for reports + ledger partitioning). Indicative local run:
-~2000 signed bets/s at p99 ~16 ms, concurrency 16 (laptop, API + DB co-located —
+~2000 signed bets/s at p99 ~16 ms, concurrency 16 (laptop, API + DB co-located,
 a relative baseline, not a ceiling).
 
 ## Limitations
@@ -134,3 +134,12 @@ a relative baseline, not a ceiling).
   move to `BigInt` / `NUMERIC` end to end.
 - A large-window RTP aggregate scans every in-window row; a production system
   would read from a maintained rollup / materialized summary. Out of scope here.
+
+## Possible Future Optimizations
+
+- **Write-optimized balances (CQRS).** If we were willing to drop synchronous
+  insufficient-funds rejection, the write path could become a pure append to the
+  `transactions` ledger (no wallet lock, no read-modify-write), with balances
+  derived on demand and a background worker periodically snapshotting per-user
+  balances (so reads only sum the delta since the last rollup). This trades the
+  synchronous funds guarantee for higher write throughput and simpler ordering.
